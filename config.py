@@ -1,115 +1,137 @@
 """
 Training Configuration for DACL10K U-Net
-Modify these parameters based on your hardware
+Optimized for: RX 6600 8GB + Windows + torch-directml
 """
 
 # ============================================================================
 # DATASET CONFIGURATION
 # ============================================================================
-DATA_ROOT = r"C:\Users\Informatics\Desktop\dataset_mémoire\segmentation_project\dataset"
+DATA_ROOT = r"C:\Users\Ismail Triki\Desktop\hani_dataset_memoire\dacl10k-segmentation\dataset"
 NUM_CLASSES = 20  # 19 defect classes + 1 background
 
 CLASS_NAMES = [
- "background",
- "graffiti",
- "drainage",
- "wetspot",
- "weathering",
- "crack",
- "rockpocket",
- "spalling",
- "washouts/concrete corrosion",
- "cavity",
- "efflorescence",
- "rust",
- "protective equipment",
- "exposed rebars",
- "bearing",
- "hollowareas",
- "joint tape",
- "restformwork",
- "alligator crack",
- "expansion joint"
+    "background",
+    "graffiti",
+    "drainage",
+    "wetspot",
+    "weathering",
+    "crack",
+    "rockpocket",
+    "spalling",
+    "washouts/concrete corrosion",
+    "cavity",
+    "efflorescence",
+    "rust",
+    "protective equipment",
+    "exposed rebars",
+    "bearing",
+    "hollowareas",
+    "joint tape",
+    "restformwork",
+    "alligator crack",
+    "expansion joint",
 ]
 
 # ============================================================================
 # TRAINING CONFIGURATION
 # ============================================================================
+CPU_MODE = False  # GPU mode
 
-# Choose your training mode
-# Option 1: CPU mode (local testing only, very slow)
-# Option 2: GPU mode (for Google Colab or if you have GPU)
-CPU_MODE = True  # Set to False if using GPU
-
-# Model configuration
 if CPU_MODE:
-    MODEL_TYPE = 'unet_lite'  # Lightweight model for CPU
-    IMG_SIZE = (256, 256)     # Smaller images
-    BATCH_SIZE = 2            # Small batch size
-    NUM_WORKERS = 0           # Fewer workers
-    NUM_EPOCHS = 5            # Just for testing
-    PRINT_FREQ = 50           # Print every 50 batches
+    MODEL_TYPE = "unet_lite"
+    IMG_SIZE = (256, 256)
+    BATCH_SIZE = 2
+    NUM_WORKERS = 0
+    NUM_EPOCHS = 2
+    PRINT_FREQ = 50
 else:
-    MODEL_TYPE = 'unet'       # Standard U-Net for GPU
-    IMG_SIZE = (512, 512)     # Full resolution
-    BATCH_SIZE = 8            # Larger batch size
-    NUM_WORKERS = 0           # More workers
-    NUM_EPOCHS = 50           # Full training
-    PRINT_FREQ = 20           # Print every 20 batches
+    # ✅ RX 6600 OPTIMIZED SETTINGS
+    MODEL_TYPE = "unet"
+    IMG_SIZE = (384, 384)    # ✅ CHANGED: Better quality than 256
+    BATCH_SIZE = 1           # ✅ OK for RX 6600 8GB
+    NUM_WORKERS = 0          # ✅ Required for Windows
+    NUM_EPOCHS = 50
+    PRINT_FREQ = 20
+
+# ============================================================================
+# MIXED PRECISION (AMP)
+# ============================================================================
+USE_AMP = False  # ✅ Keep OFF for DirectML
 
 # ============================================================================
 # OPTIMIZER CONFIGURATION
 # ============================================================================
-LEARNING_RATE = 1e-4
+# ✅ CHANGED: Adam is easier and works better
+OPTIMIZER = "adam"          # ✅ CHANGED from 'sgd' to 'adam'
+LEARNING_RATE = 0.001        # ✅ CHANGED from 0.01 to 0.0001
 WEIGHT_DECAY = 1e-4
-OPTIMIZER = 'adam'  # 'adam' or 'sgd'
 
-# SGD specific (if using SGD)
+# SGD specific (not used with Adam)
 MOMENTUM = 0.9
 
-# Learning rate scheduler
+# ============================================================================
+# LEARNING RATE SCHEDULER
+# ============================================================================
 USE_SCHEDULER = True
-SCHEDULER_TYPE = 'cosine'  # 'cosine', 'step', or 'plateau'
-SCHEDULER_PATIENCE = 5     # For ReduceLROnPlateau
-SCHEDULER_FACTOR = 0.5     # LR reduction factor
-SCHEDULER_STEP_SIZE = 10   # For StepLR
+SCHEDULER_TYPE = "cosine"
+
+# ReduceLROnPlateau params
+SCHEDULER_PATIENCE = 5
+SCHEDULER_FACTOR = 0.5
+
+# StepLR params
+SCHEDULER_STEP_SIZE = 10
 
 # ============================================================================
 # LOSS FUNCTION CONFIGURATION
 # ============================================================================
-LOSS_TYPE = 'ce'  # 'ce' (CrossEntropy), 'focal', or 'dice'
+LOSS_TYPE = "focal_dice"
 
-# Focal Loss parameters (if using focal loss)
+# Focal Loss params
 FOCAL_ALPHA = 0.25
 FOCAL_GAMMA = 2.0
 
-# Class weights (optional, for imbalanced classes)
-# Set to None to not use class weights
-# Or provide list of 20 weights (one per class)
-CLASS_WEIGHTS = None  # Will be computed from dataset if None
-
+# Class weights
+CLASS_WEIGHTS = [
+    0.053914,  # 0:  background
+    1.096377,  # 1:  graffiti
+    0.968970,  # 2:  drainage
+    0.956229,  # 3:  wetspot
+    0.365729,  # 4:  weathering
+    1.368079,  # 5:  crack
+    1.386403,  # 6:  rockpocket
+    0.823869,  # 7:  spalling
+    1.204228,  # 8:  washouts/concrete corrosion
+    1.273950,  # 9:  cavity
+    0.789514,  # 10: efflorescence
+    0.942899,  # 11: rust
+    0.565548,  # 12: protective equipment
+    1.479404,  # 13: exposed rebars
+    0.880581,  # 14: bearing
+    0.887381,  # 15: hollowareas
+    1.452674,  # 16: joint tape
+    1.464628,  # 17: restformwork
+    1.025850,  # 18: alligator crack
+    1.013773,  # 19: expansion joint
+]
 # ============================================================================
 # TRAINING SETTINGS
 # ============================================================================
 SAVE_DIR = "checkpoints"
 LOG_DIR = "logs"
+
 SAVE_BEST_ONLY = True
-EARLY_STOPPING_PATIENCE = 15  # Stop if no improvement for N epochs
+EARLY_STOPPING_PATIENCE = 15
 
-# Resume training
-RESUME_CHECKPOINT = None  # Path to checkpoint to resume from, or None
-
-# Validation
-VAL_FREQUENCY = 1  # Validate every N epochs
-
-# Mixed precision training (only for GPU)
-USE_AMP = False if CPU_MODE else True  # Automatic Mixed Precision
+# ✅ CHANGED: None for fresh start
+RESUME_CHECKPOINT = None # Validation
+VAL_FREQUENCY = 1
 
 # ============================================================================
 # VISUALIZATION
 # ============================================================================
-VIS_SAMPLES = 4  # Number of samples to visualize per validation
-VIS_FREQUENCY = 5  # Visualize every N epochs
+VIS_SAMPLES = 4
+VIS_FREQUENCY = 5
 
 # ============================================================================
 # RANDOM SEED
@@ -117,27 +139,26 @@ VIS_FREQUENCY = 5  # Visualize every N epochs
 RANDOM_SEED = 42
 
 # ============================================================================
-# GPU SETTINGS (if available)
+# GPU SETTINGS
 # ============================================================================
-GPU_ID = 0  # GPU device ID
-USE_MULTI_GPU = False  # Use DataParallel for multiple GPUs
+GPU_ID = 0
+USE_MULTI_GPU = False
 
 # ============================================================================
 # WANDB LOGGING (optional)
 # ============================================================================
-USE_WANDB = False  # Set to True to use Weights & Biases logging
+USE_WANDB = False
 WANDB_PROJECT = "dacl10k-segmentation"
-WANDB_ENTITY = None  # Your wandb username, or None
+WANDB_ENTITY = None
 
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
-
 def get_config_summary():
     """Print configuration summary"""
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("TRAINING CONFIGURATION")
-    print("="*70)
+    print("=" * 70)
     print(f"Mode:              {'CPU (TESTING)' if CPU_MODE else 'GPU (FULL TRAINING)'}")
     print(f"Model:             {MODEL_TYPE}")
     print(f"Image Size:        {IMG_SIZE}")
@@ -151,7 +172,7 @@ def get_config_summary():
     print(f"Num Classes:       {NUM_CLASSES}")
     print(f"Num Workers:       {NUM_WORKERS}")
     print(f"Save Directory:    {SAVE_DIR}")
-    print("="*70 + "\n")
+    print("=" * 70 + "\n")
 
 
 if __name__ == "__main__":

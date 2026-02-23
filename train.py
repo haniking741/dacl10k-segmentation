@@ -1,6 +1,6 @@
 """
 Main Training Script for U-Net on DACL10K
-Supports both CPU and GPU training
+Supports CPU, CUDA (NVIDIA), and DirectML (AMD/Intel) training
 """
 import os
 import sys
@@ -8,9 +8,11 @@ import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
 import numpy as np
+
+# ✅ Device-agnostic AMP (works best for CUDA; we will disable AMP for DirectML/CPU)
+from torch.amp import autocast, GradScaler
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -18,7 +20,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from models.unet import get_model
 from data.dataset import get_dataloaders
-from utils.metrics import SegmentationMetrics, compute_iou
+from utils.metrics import SegmentationMetrics
 
 
 class Trainer:
@@ -27,25 +29,19 @@ class Trainer:
         # Set random seed
         torch.manual_seed(config.RANDOM_SEED)
         np.random.seed(config.RANDOM_SEED)
-        
-        # Device
-        if config.CPU_MODE:
-            self.device = torch.device('cpu')
-            print("🐌 Running on CPU (slow, for testing only)")
-        else:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            if self.device.type == 'cuda':
-                print(f"🚀 Running on GPU: {torch.cuda.get_device_name(0)}")
-            else:
-                print("⚠️  No GPU found, falling back to CPU")
-        
+
+        # ---------------------------
+        # Device selection (CPU/CUDA/DirectML)
+        # ---------------------------
+        self.device, self.device_type = self._get_device()
+
         # Create directories
         os.makedirs(config.SAVE_DIR, exist_ok=True)
         os.makedirs(config.LOG_DIR, exist_ok=True)
-        
+
         # Print configuration
         config.get_config_summary()
-        
+
         # Load data
         print("📂 Loading dataset...")
         self.train_loader, self.val_loader, self.num_classes = get_dataloaders(
@@ -55,7 +51,7 @@ class Trainer:
             img_size=config.IMG_SIZE,
             cpu_mode=config.CPU_MODE
         )
-        
+
         # Create model
         print("\n📐 Creating model...")
         self.model = get_model(
@@ -63,64 +59,160 @@ class Trainer:
             n_classes=self.num_classes,
             device=self.device
         )
-        
+
         # Loss function
         self.criterion = self._get_criterion()
-        
+
         # Optimizer
         self.optimizer = self._get_optimizer()
-        
+
         # Learning rate scheduler
         self.scheduler = self._get_scheduler() if config.USE_SCHEDULER else None
-        
-        # Mixed precision scaler
-        self.scaler = GradScaler() if config.USE_AMP else None
-        
+
+        # ---------------------------
+        # AMP: enable only on CUDA
+        # ---------------------------
+        self.use_amp = bool(config.USE_AMP) and (self.device_type == "cuda")
+        self.scaler = GradScaler(enabled=self.use_amp)
+
+        if self.use_amp:
+            print("⚡ AMP enabled (CUDA)")
+        else:
+            print("ℹ️  AMP disabled (CPU/DirectML)")
+
         # Metrics
         self.metrics = SegmentationMetrics(
             num_classes=self.num_classes,
             class_names=config.CLASS_NAMES
         )
-        
+
         # Training state
         self.start_epoch = 0
         self.best_miou = 0.0
         self.train_losses = []
         self.val_losses = []
         self.val_mious = []
-        
+
         # Resume from checkpoint if specified
         if config.RESUME_CHECKPOINT and os.path.exists(config.RESUME_CHECKPOINT):
             self._load_checkpoint(config.RESUME_CHECKPOINT)
-    
-    def _get_criterion(self):
-        """Create loss function"""
-        if config.LOSS_TYPE == 'ce':
-            # Standard Cross Entropy
-            if config.CLASS_WEIGHTS is not None:
-                weights = torch.tensor(config.CLASS_WEIGHTS, dtype=torch.float32).to(self.device)
-                criterion = nn.CrossEntropyLoss(weight=weights)
+
+    def _get_device(self):
+        """
+        Return (device, device_type_string). 
+        device_type_string in {'cpu','cuda','directml'}
+        
+        ✅ FIXED: Now tries to use GPU 1 (RX 6600) instead of GPU 0 (integrated)
+        """
+        if config.CPU_MODE:
+            print("🐌 Running on CPU (slow, for testing only)")
+            return torch.device("cpu"), "cpu"
+
+        # 1) CUDA (NVIDIA)
+        if torch.cuda.is_available():
+            dev = torch.device("cuda")
+            print(f"🚀 Running on CUDA GPU: {torch.cuda.get_device_name(0)}")
+            return dev, "cuda"
+
+        # 2) DirectML (AMD / Intel)
+        try:
+            import torch_directml
+            if torch_directml.is_available():
+                # ✅ FIX: Try to use GPU 1 (RX 6600) instead of GPU 0 (integrated)
+                device_count = torch_directml.device_count()
+                print(f"🔍 Found {device_count} DirectML device(s)")
+                
+                if device_count > 1:
+                    # Multiple GPUs detected, prefer GPU 1 (RX 6600)
+                    dev = torch_directml.device(1)
+                    print("🎮 Using GPU 1 (RX 6600 - Discrete GPU)")
+                else:
+                    # Only one GPU, use it
+                    dev = torch_directml.device(0)
+                    print("🚀 Running on DirectML GPU 0")
+                
+                return dev, "directml"
             else:
-                criterion = nn.CrossEntropyLoss()
+                print("⚠️ DirectML not available, falling back to CPU")
+                return torch.device("cpu"), "cpu"
+        except Exception as e:
+            print(f"⚠️ torch_directml failed ({e}), falling back to CPU")
+            return torch.device("cpu"), "cpu"
+
+    def _get_criterion(self):
+        """Create loss function (supports CE / Weighted CE / Dice / Focal + combos)"""
+
+        loss_type = config.LOSS_TYPE.lower()
+
+        # Import losses
+        from utils.losses import FocalLoss, DiceLoss, CombinedLoss
+
+        # ---------
+        # Helpers
+        # ---------
+        def make_ce(weighted: bool):
+            if weighted and (config.CLASS_WEIGHTS is not None):
+                weights = torch.tensor(config.CLASS_WEIGHTS, dtype=torch.float32).to(self.device)
+                return nn.CrossEntropyLoss(weight=weights)
+            return nn.CrossEntropyLoss()
+
+        def make_focal():
+            # If you want per-class alpha, set FOCAL_ALPHA in config as list of length C
+            return FocalLoss(alpha=config.FOCAL_ALPHA, gamma=config.FOCAL_GAMMA, ignore_index=None)
+
+        def make_dice():
+            return DiceLoss(ignore_index=None)
+
+        # -------------------
+        # Single-loss options
+        # -------------------
+        if loss_type == "ce":
+            criterion = make_ce(weighted=False)
             print("📊 Using CrossEntropyLoss")
-        
-        elif config.LOSS_TYPE == 'focal':
-            # Focal Loss (for class imbalance)
-            from utils.losses import FocalLoss
-            criterion = FocalLoss(alpha=config.FOCAL_ALPHA, gamma=config.FOCAL_GAMMA)
-            print("📊 Using Focal Loss")
-        
-        elif config.LOSS_TYPE == 'dice':
-            # Dice Loss
-            from utils.losses import DiceLoss
-            criterion = DiceLoss()
+
+        elif loss_type == "wce":
+            criterion = make_ce(weighted=True)
+            print("📊 Using Weighted CrossEntropyLoss")
+
+        elif loss_type == "dice":
+            criterion = make_dice()
             print("📊 Using Dice Loss")
-        
+
+        elif loss_type == "focal":
+            criterion = make_focal()
+            print("📊 Using Focal Loss")
+
+        # -------------------
+        # Combined-loss options
+        # -------------------
+        elif loss_type == "ce_dice":
+            ce = make_ce(weighted=False)
+            dice = make_dice()
+            criterion = CombinedLoss(ce, dice, w1=1.0, w2=1.0)
+            print("📊 Using CE + Dice Loss")
+
+        elif loss_type == "wce_dice":
+            ce = make_ce(weighted=True)
+            dice = make_dice()
+            criterion = CombinedLoss(ce, dice, w1=1.0, w2=1.0)
+            print("📊 Using Weighted CE + Dice Loss")
+
+        elif loss_type == "focal_dice":
+            focal = make_focal()
+            dice = make_dice()
+            criterion = CombinedLoss(focal, dice, w1=1.0, w2=1.0)
+            print("📊 Using Focal + Dice Loss")
+        elif loss_type == "wce":
+            criterion = make_ce(weighted=True)  # ✅ This uses CLASS_WEIGHTS
+            print("📊 Using Weighted CrossEntropyLoss")
         else:
-            raise ValueError(f"Unknown loss type: {config.LOSS_TYPE}")
-        
+            raise ValueError(
+                f"Unknown LOSS_TYPE: {config.LOSS_TYPE}. "
+                "Use one of: ce, wce, dice, focal, ce_dice, wce_dice, focal_dice"
+            )
+
         return criterion
-    
+
     def _get_optimizer(self):
         """Create optimizer"""
         if config.OPTIMIZER == 'adam':
@@ -138,17 +230,14 @@ class Trainer:
             )
         else:
             raise ValueError(f"Unknown optimizer: {config.OPTIMIZER}")
-        
+
         print(f"⚙️  Optimizer: {config.OPTIMIZER.upper()}, LR={config.LEARNING_RATE}")
         return optimizer
-    
+
     def _get_scheduler(self):
         """Create learning rate scheduler"""
         if config.SCHEDULER_TYPE == 'cosine':
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                self.optimizer,
-                T_max=config.NUM_EPOCHS
-            )
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=config.NUM_EPOCHS)
         elif config.SCHEDULER_TYPE == 'step':
             scheduler = optim.lr_scheduler.StepLR(
                 self.optimizer,
@@ -163,85 +252,83 @@ class Trainer:
                 patience=config.SCHEDULER_PATIENCE
             )
         else:
-            raise ValueError(f"Unknown scheduler: {config.SCHEDULER_TYPE}")
-        
+            raise ValueError(f"Unknown scheduler type: {config.SCHEDULER_TYPE}")
+
         print(f"📈 Scheduler: {config.SCHEDULER_TYPE}")
         return scheduler
-    
+
     def train_epoch(self, epoch):
         """Train for one epoch"""
         self.model.train()
         epoch_loss = 0.0
-        
+
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{config.NUM_EPOCHS} [TRAIN]")
-        
-        for batch_idx, (images, masks) in enumerate(pbar):
-            # Move to device
+
+        for images, masks in pbar:
             images = images.to(self.device)
             masks = masks.to(self.device)
-            
-            # Forward pass
-            if config.USE_AMP:
-                with autocast():
+
+            self.optimizer.zero_grad()
+
+            # Forward + loss
+            if self.use_amp:
+                with autocast(device_type="cuda", enabled=True):
                     outputs = self.model(images)
                     loss = self.criterion(outputs, masks)
-            else:
-                outputs = self.model(images)
-                loss = self.criterion(outputs, masks)
-            
-            # Backward pass
-            self.optimizer.zero_grad()
-            
-            if config.USE_AMP:
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
+                outputs = self.model(images)
+                loss = self.criterion(outputs, masks)
                 loss.backward()
                 self.optimizer.step()
-            
-            # Update metrics
+
             epoch_loss += loss.item()
-            
-            # Update progress bar
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
-        
-        avg_loss = epoch_loss / len(self.train_loader)
-        return avg_loss
-    
+
+        return epoch_loss / max(1, len(self.train_loader))
+
     @torch.no_grad()
     def validate(self, epoch):
         """Validate the model"""
         self.model.eval()
         val_loss = 0.0
         self.metrics.reset()
-        
-        pbar = tqdm(self.val_loader, desc=f"Epoch {epoch}/{config.NUM_EPOCHS} [VAL]  ")
-        
+
+        pbar = tqdm(self.val_loader, desc=f"Epoch {epoch}/{config.NUM_EPOCHS} [VAL]")
+
         for images, masks in pbar:
             images = images.to(self.device)
             masks = masks.to(self.device)
-            
-            # Forward pass
+
             outputs = self.model(images)
             loss = self.criterion(outputs, masks)
             val_loss += loss.item()
-            
-            # Get predictions
+
             preds = torch.argmax(outputs, dim=1)
-            
-            # Update metrics
+            # ================= DEBUG CHECK (FIRST BATCH ONLY) =================
+# ================= DEBUG CHECK (FIRST BATCH ONLY) =================
+            if pbar.n == 0:
+                 preds_cpu = preds.detach().cpu()
+                 masks_cpu = masks.detach().cpu()
+                 bg_pred = (preds_cpu == 0).float().mean().item()
+                 bg_true = (masks_cpu == 0).float().mean().item()
+                 print("\n========== DEBUG ==========")
+                 print(f"% predicted background: {bg_pred*100:.2f}%")
+                 print(f"% true background:      {bg_true*100:.2f}%")
+                 print("Unique predicted labels:", torch.unique(preds_cpu).numpy())
+                 print("Unique true labels:     ", torch.unique(masks_cpu).numpy())
+                 print("================================\n")
+# ================================================================
+
             self.metrics.update(preds, masks)
-            
-            # Update progress bar
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
-        
-        # Compute metrics
+
         metrics = self.metrics.get_metrics()
-        avg_loss = val_loss / len(self.val_loader)
-        
+        avg_loss = val_loss / max(1, len(self.val_loader))
         return avg_loss, metrics
-    
+
     def save_checkpoint(self, epoch, miou, is_best=False):
         """Save model checkpoint"""
         checkpoint = {
@@ -253,61 +340,56 @@ class Trainer:
             'val_losses': self.val_losses,
             'val_mious': self.val_mious,
         }
-        
+
         if self.scheduler is not None:
             checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
-        
-        # Save latest checkpoint
+
         latest_path = os.path.join(config.SAVE_DIR, 'checkpoint_latest.pth')
         torch.save(checkpoint, latest_path)
-        
-        # Save best checkpoint
+
         if is_best:
             best_path = os.path.join(config.SAVE_DIR, 'checkpoint_best.pth')
             torch.save(checkpoint, best_path)
             print(f"💾 Saved best model (mIoU: {miou:.4f})")
-    
+
     def _load_checkpoint(self, checkpoint_path):
         """Load checkpoint"""
         print(f"📥 Loading checkpoint from {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        
+
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        
+
         if self.scheduler is not None and 'scheduler_state_dict' in checkpoint:
             self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        
+
         self.start_epoch = checkpoint['epoch'] + 1
         self.best_miou = checkpoint.get('best_miou', 0.0)
         self.train_losses = checkpoint.get('train_losses', [])
         self.val_losses = checkpoint.get('val_losses', [])
         self.val_mious = checkpoint.get('val_mious', [])
-        
+
         print(f"✅ Resumed from epoch {self.start_epoch}, best mIoU: {self.best_miou:.4f}")
-    
+
     def train(self):
         """Main training loop"""
         print("\n" + "="*70)
         print("🚀 STARTING TRAINING")
         print("="*70 + "\n")
-        
+
         no_improvement = 0
-        
+
         for epoch in range(self.start_epoch, config.NUM_EPOCHS):
             epoch_start = time.time()
-            
-            # Train
+
             train_loss = self.train_epoch(epoch)
             self.train_losses.append(train_loss)
-            
-            # Validate
+
             if (epoch + 1) % config.VAL_FREQUENCY == 0:
                 val_loss, metrics = self.validate(epoch)
                 self.val_losses.append(val_loss)
                 self.val_mious.append(metrics['mIoU'])
-                
-                # Print results
+
                 print(f"\n📊 Epoch {epoch}/{config.NUM_EPOCHS} Summary:")
                 print(f"  Train Loss: {train_loss:.4f}")
                 print(f"  Val Loss:   {val_loss:.4f}")
@@ -315,38 +397,33 @@ class Trainer:
                 print(f"  F1-score:   {metrics['mean_F1']:.4f}")
                 print(f"  Pixel Acc:  {metrics['Pixel_Accuracy']:.4f}")
                 print(f"  Time:       {time.time() - epoch_start:.1f}s")
-                
-                # Learning rate
+
                 current_lr = self.optimizer.param_groups[0]['lr']
                 print(f"  LR:         {current_lr:.6f}\n")
-                
-                # Check if best model
+
                 is_best = metrics['mIoU'] > self.best_miou
                 if is_best:
                     self.best_miou = metrics['mIoU']
                     no_improvement = 0
                 else:
                     no_improvement += 1
-                
-                # Save checkpoint
+
                 if config.SAVE_BEST_ONLY:
                     if is_best:
                         self.save_checkpoint(epoch, metrics['mIoU'], is_best=True)
                 else:
                     self.save_checkpoint(epoch, metrics['mIoU'], is_best=is_best)
-                
-                # Early stopping
+
                 if no_improvement >= config.EARLY_STOPPING_PATIENCE:
-                    print(f"\n⚠️  Early stopping: No improvement for {config.EARLY_STOPPING_PATIENCE} epochs")
+                    print(f"\n⚠️ Early stopping: No improvement for {config.EARLY_STOPPING_PATIENCE} epochs")
                     break
-                
-                # Update scheduler
+
                 if self.scheduler is not None:
                     if config.SCHEDULER_TYPE == 'plateau':
                         self.scheduler.step(metrics['mIoU'])
                     else:
                         self.scheduler.step()
-        
+
         print("\n" + "="*70)
         print("✅ TRAINING COMPLETE!")
         print("="*70)
@@ -356,7 +433,6 @@ class Trainer:
 
 
 def main():
-    """Main function"""
     trainer = Trainer()
     trainer.train()
 
