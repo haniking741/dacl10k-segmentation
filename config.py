@@ -6,7 +6,7 @@ Optimized for: RX 6600 8GB + Windows + torch-directml
 # ============================================================================
 # DATASET CONFIGURATION
 # ============================================================================
-DATA_ROOT = r"C:\Users\Ismail Triki\Desktop\hani_dataset_memoire\dacl10k-segmentation\dataset"
+DATA_ROOT = r"C:\Users\Informatics\Desktop\dataset_mémoire\segmentation_project\dataset"
 NUM_CLASSES = 20  # 19 defect classes + 1 background
 
 CLASS_NAMES = [
@@ -45,18 +45,18 @@ if CPU_MODE:
     NUM_EPOCHS = 2
     PRINT_FREQ = 50
 else:
-    # ✅ RX 6600 OPTIMIZED SETTINGS
+    # ✅ RTX 4070 OPTIMIZED SETTINGS
     MODEL_TYPE = "unet"
-    IMG_SIZE = (384, 384)    # ✅ CHANGED: Better quality than 256
-    BATCH_SIZE = 1           # ✅ OK for RX 6600 8GB
-    NUM_WORKERS = 0          # ✅ Required for Windows
+    IMG_SIZE = (1024, 1024)    # ✅ CHANGED: Better quality than 256
+    BATCH_SIZE = 2           # ✅ OK for RX 6600 8GB
+    NUM_WORKERS = 6          # ✅ Required for Windows
     NUM_EPOCHS = 50
     PRINT_FREQ = 20
 
 # ============================================================================
 # MIXED PRECISION (AMP)
 # ============================================================================
-USE_AMP = False  # ✅ Keep OFF for DirectML
+USE_AMP = True  # ✅ Keep OFF for DirectML
 
 # ============================================================================
 # OPTIMIZER CONFIGURATION
