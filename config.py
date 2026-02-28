@@ -7,7 +7,7 @@ Training Configuration (MULTI-LABEL) for DACL10K U-Net
 # ============================================================================
 # DATASET CONFIGURATION
 # ============================================================================
-DATA_ROOT = r"C:\Users\Informatics\Desktop\dataset_mémoire\segmentation_project\dataset2"
+DATA_ROOT = r"C:\Users\Ismail Triki\Desktop\hani_dataset_memoire\dacl10k-segmentation\dataset2"
 
 # Multi-label = 19 classes (بدون background كقناة)
 NUM_LABELS = 19
@@ -44,16 +44,16 @@ IMAGES_SUBDIR = "images"
 CPU_MODE = False # على RTX 4070 خليها False
 
 MODEL_TYPE = "unet"
-IMG_SIZE = (512, 512)
+IMG_SIZE = (384, 384)
 BATCH_SIZE = 2
-NUM_WORKERS = 6
+NUM_WORKERS = 0
 NUM_EPOCHS = 50
 PRINT_FREQ = 20
 
 # ============================================================================
 # AMP (Mixed Precision)
 # ============================================================================
-USE_AMP = True # ✅ CUDA only
+USE_AMP = False # ✅ CUDA only
 
 # ============================================================================
 # OPTIMIZER
@@ -86,7 +86,7 @@ DICE_SMOOTH = 1.0
 # ============================================================================
 # CROP / AUGMENTATION
 # ============================================================================
-DEFECT_CROP_PROB = 0.7
+DEFECT_CROP_PROB = 0.2
 CROP_RATIO = 0.60
 CROP_TRIES = 10
 MIN_DEFECT_RATIO = 0.01
@@ -105,7 +105,7 @@ VAL_FREQUENCY = 1
 # MISC
 # ============================================================================
 RANDOM_SEED = 42
-GPU_ID = 0
+GPU_ID = 1
 USE_MULTI_GPU = False
 
 def get_config_summary():
