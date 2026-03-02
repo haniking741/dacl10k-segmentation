@@ -15,7 +15,7 @@ from tqdm import tqdm
 from torch.amp import autocast, GradScaler
 
 import config
-from models.unet import get_model
+from models import get_model
 from data.dataset_multilabel import get_dataloaders_multilabel
 from utils.losses_multilabel import MultiLabelDiceLoss
 from utils.metrics_multilabel import MultiLabelSegmentationMetrics
@@ -75,11 +75,14 @@ class Trainer:
         self.optimizer = self._get_optimizer()
         self.scheduler = self._get_scheduler() if config.USE_SCHEDULER else None
 
+        # ---------------------------
         # Metrics
-        # class_names should match NUM_LABELS (19) (defects only)
+        # ---------------------------
         self.metrics = MultiLabelSegmentationMetrics(
             num_classes=self.num_labels,
-            class_names=getattr(config, "LABEL_NAMES", None), # optional
+            class_names=getattr(config, "CLASS_NAMES", None), # should be 19 names ideally
+            threshold=getattr(config, "THRESHOLD", 0.5),
+            ignore_empty=True,
         )
 
         self.best_miou = 0.0
@@ -109,8 +112,9 @@ class Trainer:
             if torch_directml.is_available():
                 n = torch_directml.device_count()
                 print(f"🔍 Found {n} DirectML device(s)")
-                dev = torch_directml.device(getattr(config, "GPU_ID", 0))
-                print(f"🎮 Using DirectML GPU {getattr(config, 'GPU_ID', 0)}")
+                gpu_id = int(getattr(config, "GPU_ID", 0))
+                dev = torch_directml.device(gpu_id)
+                print(f"🎮 Using DirectML GPU {gpu_id}")
                 return dev, "directml"
         except Exception as e:
             print(f"⚠️ torch_directml not available ({e})")
@@ -161,12 +165,11 @@ class Trainer:
 
         if lt == "dice":
             print("📊 Loss: MultiLabel Dice")
-            return MultiLabelDiceLoss()
+            return MultiLabelDiceLoss(smooth=getattr(config, "DICE_SMOOTH", 1.0))
 
         if lt == "bce_dice":
             print("📊 Loss: BCE + Dice")
-
-            dice = MultiLabelDiceLoss()
+            dice = MultiLabelDiceLoss(smooth=getattr(config, "DICE_SMOOTH", 1.0))
 
             def loss_fn(logits, targets):
                 return 1.0 * bce_loss(logits, targets) + 1.0 * dice(logits, targets)
@@ -279,14 +282,13 @@ class Trainer:
     # ==========================================================
     # CHECKPOINT
     # ==========================================================
-    def save_best(self, epoch, miou):
+    def save_best(self, epoch, miou, metrics=None):
         path = os.path.join(config.SAVE_DIR, "checkpoint_best_multilabel.pth")
         torch.save(
             {
                 "epoch": epoch,
-                "model": self.model.state_dict(),
-                "optimizer": self.optimizer.state_dict(),
-                "best_miou": self.best_miou,
+                "model": self.model.state_dict(),   # only model
+                "best_miou": float(miou),
             },
             path
         )
@@ -307,30 +309,36 @@ class Trainer:
             tr_loss = self.train_epoch(epoch)
 
             val_loss, metrics = self.validate(epoch)
-            miou = metrics.get("mIoU", 0.0)
+        
+        # ✅ CRITICAL FIX - Change these lines:
+            miou = metrics.get("mean_IoU", 0.0)
+            mean_f1 = metrics.get("mean_F1", 0.0)
+            mean_precision = metrics.get("mean_Precision", 0.0)
+            mean_recall = metrics.get("mean_Recall", 0.0)
 
             print(f"\n📊 Epoch {epoch} Summary:")
             print(f" Train Loss: {tr_loss:.4f}")
             print(f" Val Loss: {val_loss:.4f}")
             print(f" mIoU: {miou:.4f}")
-            if "mean_F1" in metrics:
-                print(f" mean_F1: {metrics['mean_F1']:.4f}")
+            print(f" mean_F1: {mean_f1:.4f}")
+            print(f" mean_Precision: {mean_precision:.4f}")
+            print(f" mean_Recall: {mean_recall:.4f}")
             print(f" Time: {time.time() - t0:.1f}s")
             print(f" LR: {self.optimizer.param_groups[0]['lr']:.6f}")
 
             improved = miou > self.best_miou
             if improved:
-                self.best_miou = miou
-                no_imp = 0
-                self.save_best(epoch, miou)
+               self.best_miou = miou
+               no_imp = 0
+               self.save_best(epoch, miou, metrics)
             else:
                 no_imp += 1
 
             if self.scheduler is not None:
-                if config.SCHEDULER_TYPE.lower() == "plateau":
-                    self.scheduler.step(miou)
-                else:
-                    self.scheduler.step()
+               if config.SCHEDULER_TYPE.lower() == "plateau":
+                   self.scheduler.step(miou)
+               else:
+                   self.scheduler.step()
 
             if no_imp >= config.EARLY_STOPPING_PATIENCE:
                 print("⚠️ Early stopping (no improvement)")

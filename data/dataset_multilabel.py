@@ -273,7 +273,7 @@ def get_dataloaders_multilabel(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=False,
-        drop_last=False,
+        drop_last=True,
     )
 
     val_loader = DataLoader(
@@ -287,5 +287,5 @@ def get_dataloaders_multilabel(
 
     print(f"✅ Train: {len(train_ds)} images, {len(train_loader)} batches")
     print(f"✅ Val: {len(val_ds)} images, {len(val_loader)} batches")
-
+    print("Dataset img_size:", img_size)
     return train_loader, val_loader, num_labels

@@ -1,37 +1,34 @@
-# Save as scripts/visualize_samples.py
-import random
-from pathlib import Path
+import os
+import sys
+
+# Add project root to Python path
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(ROOT_DIR)
 import matplotlib.pyplot as plt
-from PIL import Image
-import numpy as np
+import config
+from data.dataset_multilabel import get_dataloaders_multilabel
 
-def visualize_samples(split="train", num_samples=6):
-    img_dir = Path(f"dataset/images/{split}")
-    mask_dir = Path(f"dataset/masks/{split}")
-    
-    images = list(img_dir.glob("*.jpg"))
-    samples = random.sample(images, min(num_samples, len(images)))
-    
-    fig, axes = plt.subplots(num_samples, 2, figsize=(12, 4*num_samples))
-    
-    for idx, img_path in enumerate(samples):
-        mask_path = mask_dir / img_path.with_suffix(".png").name
-        
-        img = Image.open(img_path)
-        mask = Image.open(mask_path)
-        
-        axes[idx, 0].imshow(img)
-        axes[idx, 0].set_title(f"Image: {img_path.name}")
-        axes[idx, 0].axis('off')
-        
-        axes[idx, 1].imshow(mask, cmap='tab20')
-        axes[idx, 1].set_title(f"Mask: {mask_path.name}")
-        axes[idx, 1].axis('off')
-    
-    plt.tight_layout()
-    plt.savefig(f"visualization_{split}.png", dpi=150, bbox_inches='tight')
-    print(f"✅ Saved visualization_{split}.png")
-    plt.show()
+train_loader, _, _ = get_dataloaders_multilabel(
+    data_root=config.DATA_ROOT,
+    batch_size=1,
+    num_workers=0,
+    img_size=config.IMG_SIZE,
+    images_subdir=config.IMAGES_SUBDIR,
+    masks_subdir=config.MASKS_SUBDIR,
+    cpu_mode=True,
+)
 
-if __name__ == "__main__":
-    visualize_samples("train", num_samples=6)
+imgs, masks = next(iter(train_loader))
+
+img = imgs[0].permute(1,2,0).numpy()
+mask = masks[0][0].numpy() # class 0
+
+plt.subplot(1,2,1)
+plt.imshow(img)
+plt.title("Image")
+
+plt.subplot(1,2,2)
+plt.imshow(mask)
+plt.title("Mask (class 0)")
+
+plt.show()

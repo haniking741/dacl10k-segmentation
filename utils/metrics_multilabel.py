@@ -23,7 +23,7 @@ class MultiLabelSegmentationMetrics:
         self,
         num_classes: int,
         class_names=None,
-        threshold: float = 0.3,
+        threshold: float = 0.25,
         eps: float = 1e-7,
         ignore_empty: bool = True,
     ):
