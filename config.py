@@ -1,62 +1,55 @@
 """
-Training Configuration (MULTI-LABEL) for DACL10K DeepLabV3+
+Training Configuration (SINGLE-LABEL MULTI-CLASS)
+DACL10K - DeepLabV3+
 """
 
 # ============================================================================
 # DATASET CONFIGURATION
 # ============================================================================
-DATA_ROOT = r"C:\Users\Informatics\Desktop\dataset_mémoire\segmentation_project\dataset2"
+DATA_ROOT = r"C:\Users\Informatics\Desktop\dataset_mémoire\segmentation_project\dataset"
 
-# Paper uses 18 (excludes background), but 19 also works
-NUM_LABELS = 19  # Use 18 to match paper exactly
+# 19 defects + background = 20 classes
+NUM_CLASSES = 20   # 0 = background, 1..19 = defects
 
 CLASS_NAMES = [
+    "background",
     "graffiti", "drainage", "wetspot", "weathering", "crack",
-    "rockpocket", "spalling", "washouts/concrete corrosion", 
+    "rockpocket", "spalling", "washouts/concrete corrosion",
     "cavity", "efflorescence", "rust", "protective equipment",
     "exposed rebars", "bearing", "hollowareas", "joint tape",
     "restformwork", "alligator crack", "expansion joint",
 ]
 
-MASKS_SUBDIR = "masks_multilabel"
+# IMPORTANT: use original single masks folder
+MASKS_SUBDIR = "masks"
 IMAGES_SUBDIR = "images"
-
-# ============================================================================
-# METRICS CONFIGURATION
-# ============================================================================
-THRESHOLD = 0.25  # ← FIX: Multi-label threshold (was missing!)
 
 # ============================================================================
 # MODEL CONFIGURATION
 # ============================================================================
-# Options:
-# - 'deeplabv3_resnet50' (basic, no aux loss)
-# - 'deeplabv3_resnet50_aux' (with aux loss - matches paper!)
-# - 'deeplabv3_resnet101_aux' (larger, matches paper best model)
-
-MODEL_TYPE = "deeplabv3_resnet50"  # ← Use this to match paper!
+MODEL_TYPE = "resnet50"
 
 # ============================================================================
 # TRAINING CONFIGURATION
 # ============================================================================
 CPU_MODE = False
 
-IMG_SIZE = (512, 512)  # Paper uses 512×512 ✓
+IMG_SIZE = (512, 512)
 BATCH_SIZE = 4
 NUM_WORKERS = 4
-NUM_EPOCHS = 50  # Paper uses 30, but more is fine
+NUM_EPOCHS = 50
 PRINT_FREQ = 20
 
 # ============================================================================
 # AMP (Mixed Precision)
 # ============================================================================
-USE_AMP = True  # DirectML doesn't support
+USE_AMP = True  # Only works on CUDA
 
 # ============================================================================
 # OPTIMIZER
 # ============================================================================
 OPTIMIZER = "adam"
-LEARNING_RATE = 1e-4  # Paper uses multiple LRs, this is good
+LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-4
 MOMENTUM = 0.9
 
@@ -64,18 +57,16 @@ MOMENTUM = 0.9
 # LR SCHEDULER
 # ============================================================================
 USE_SCHEDULER = True
-SCHEDULER_TYPE = "cosine"  # Paper uses cosine ✓
+SCHEDULER_TYPE = "cosine"
 SCHEDULER_FACTOR = 0.5
 SCHEDULER_PATIENCE = 5
 SCHEDULER_STEP_SIZE = 10
 
 # ============================================================================
-# LOSS (MULTI-LABEL)
+# LOSS (SINGLE-LABEL)
 # ============================================================================
-LOSS_TYPE = "bce_dice"  # Paper uses Dice, but BCE+Dice is better
-
-BCE_POS_WEIGHT = None  # Can add class weights here
-DICE_SMOOTH = 1.0
+LOSS_TYPE = "ce"
+IGNORE_INDEX = 255  # If you have unlabeled pixels, else set to None
 
 # ============================================================================
 # CROP / AUGMENTATION
@@ -105,7 +96,7 @@ USE_MULTI_GPU = False
 
 def get_config_summary():
     print("\n" + "=" * 70)
-    print("TRAINING CONFIGURATION (MULTI-LABEL)")
+    print("TRAINING CONFIGURATION (SINGLE-LABEL MULTI-CLASS)")
     print("=" * 70)
     print(f"Mode: {'CPU' if CPU_MODE else 'GPU'}")
     print(f"Model: {MODEL_TYPE}")
@@ -115,9 +106,8 @@ def get_config_summary():
     print(f"Learning Rate: {LEARNING_RATE}")
     print(f"Optimizer: {OPTIMIZER}")
     print(f"Loss: {LOSS_TYPE}")
-    print(f"Threshold: {THRESHOLD}")  # ← Show threshold
     print(f"AMP: {USE_AMP}")
-    print(f"NUM_LABELS: {NUM_LABELS}")
+    print(f"NUM_CLASSES: {NUM_CLASSES}")
     print(f"Num Workers: {NUM_WORKERS}")
     print(f"DATA_ROOT: {DATA_ROOT}")
     print("=" * 70 + "\n")

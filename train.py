@@ -18,7 +18,7 @@ from torch.amp import autocast, GradScaler
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
-from models.unet import get_model
+from models.deeplabv3 import get_deeplabv3
 from data.dataset import get_dataloaders
 from utils.metrics import SegmentationMetrics
 
@@ -54,9 +54,10 @@ class Trainer:
 
         # Create model
         print("\n📐 Creating model...")
-        self.model = get_model(
-            model_type=config.MODEL_TYPE,
+        self.model = get_deeplabv3(
             n_classes=self.num_classes,
+            backbone="resnet50",   # أو resnet101
+            pretrained=True,
             device=self.device
         )
 
@@ -140,78 +141,9 @@ class Trainer:
             return torch.device("cpu"), "cpu"
 
     def _get_criterion(self):
-        """Create loss function (supports CE / Weighted CE / Dice / Focal + combos)"""
-
-        loss_type = config.LOSS_TYPE.lower()
-
-        # Import losses
-        from utils.losses import FocalLoss, DiceLoss, CombinedLoss
-
-        # ---------
-        # Helpers
-        # ---------
-        def make_ce(weighted: bool):
-            if weighted and (config.CLASS_WEIGHTS is not None):
-                weights = torch.tensor(config.CLASS_WEIGHTS, dtype=torch.float32).to(self.device)
-                return nn.CrossEntropyLoss(weight=weights)
-            return nn.CrossEntropyLoss()
-
-        def make_focal():
-            # If you want per-class alpha, set FOCAL_ALPHA in config as list of length C
-            return FocalLoss(alpha=config.FOCAL_ALPHA, gamma=config.FOCAL_GAMMA, ignore_index=None)
-
-        def make_dice():
-            return DiceLoss(ignore_index=None)
-
-        # -------------------
-        # Single-loss options
-        # -------------------
-        if loss_type == "ce":
-            criterion = make_ce(weighted=False)
-            print("📊 Using CrossEntropyLoss")
-
-        elif loss_type == "wce":
-            criterion = make_ce(weighted=True)
-            print("📊 Using Weighted CrossEntropyLoss")
-
-        elif loss_type == "dice":
-            criterion = make_dice()
-            print("📊 Using Dice Loss")
-
-        elif loss_type == "focal":
-            criterion = make_focal()
-            print("📊 Using Focal Loss")
-
-        # -------------------
-        # Combined-loss options
-        # -------------------
-        elif loss_type == "ce_dice":
-            ce = make_ce(weighted=False)
-            dice = make_dice()
-            criterion = CombinedLoss(ce, dice, w1=1.0, w2=1.0)
-            print("📊 Using CE + Dice Loss")
-
-        elif loss_type == "wce_dice":
-            ce = make_ce(weighted=True)
-            dice = make_dice()
-            criterion = CombinedLoss(ce, dice, w1=1.0, w2=1.0)
-            print("📊 Using Weighted CE + Dice Loss")
-
-        elif loss_type == "focal_dice":
-            focal = make_focal()
-            dice = make_dice()
-            criterion = CombinedLoss(focal, dice, w1=1.0, w2=1.0)
-            print("📊 Using Focal + Dice Loss")
-        elif loss_type == "wce":
-            criterion = make_ce(weighted=True)  # ✅ This uses CLASS_WEIGHTS
-            print("📊 Using Weighted CrossEntropyLoss")
-        else:
-            raise ValueError(
-                f"Unknown LOSS_TYPE: {config.LOSS_TYPE}. "
-                "Use one of: ce, wce, dice, focal, ce_dice, wce_dice, focal_dice"
-            )
-
-        return criterion
+        """Single-label CrossEntropy loss only"""
+        print("📊 Using CrossEntropyLoss (Single-Label)")
+        return nn.CrossEntropyLoss()
 
     def _get_optimizer(self):
         """Create optimizer"""
