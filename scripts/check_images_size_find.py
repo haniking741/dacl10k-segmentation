@@ -1,31 +1,21 @@
-from pathlib import Path
+import os
+import sys
+
+# Add project root to Python path
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(ROOT_DIR)
+import numpy as np
 from PIL import Image
+from pathlib import Path
 
-DATA_ROOT = Path(r"C:\Users\Informatics\Desktop\dataset_mémoire\segmentation_project\dataset")
+root = Path(r"...\dataset2\masks_multilabel\train")
+stem = "dacl10k_v2_train_0000_class01"  # بدّل باسم موجود
 
-def find_mismatches(split):
-    img_dir = DATA_ROOT / "images" / split
-    mask_dir = DATA_ROOT / "masks" / split
-
-    print(f"\nChecking {split}...")
-
-    for img_path in img_dir.iterdir():
-        if img_path.suffix.lower() not in [".jpg", ".png"]:
-            continue
-
-        mask_path = mask_dir / (img_path.stem + ".png")
-        if not mask_path.exists():
-            continue
-
-        with Image.open(img_path) as im:
-            iw, ih = im.size
-        with Image.open(mask_path) as mk:
-            mw, mh = mk.size
-
-        if (iw, ih) != (mw, mh):
-            print(f"❌ {img_path.name}")
-            print(f"   Image: {iw}×{ih}")
-            print(f"   Mask : {mw}×{mh}")
-
-find_mismatches("train")
-find_mismatches("val")
+stack = []
+for k in range(1,20):
+    p = root / f"{stem}_class{k:02d}.png"
+    m = np.array(Image.open(p))
+    stack.append((m>0).astype(np.uint8))
+stack = np.stack(stack, axis=0)  # [19,H,W]
+overlap = (stack.sum(axis=0) > 1).mean()
+print("overlap ratio:", overlap)

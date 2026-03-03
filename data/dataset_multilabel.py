@@ -123,17 +123,14 @@ class DACL10KMultiLabelDataset(Dataset):
         return self._random_crop(image, masks, crop_h, crop_w)
 
     def _load_multilabel_masks(self, base_name):
-        """
-        base_name = file stem without extension
-        returns list of PIL masks length=num_labels, each is L (0 or 255)
-        """
         masks = []
-        for k in range(1, self.num_labels + 1):
+    # Load classes 1-19 (exclude class 0 = background)
+        for k in range(1, 20):  # ← 1 to 19 (18 classes)
             fn = f"{base_name}_class{k:02d}.png"
             fp = os.path.join(self.mask_dir, fn)
             m = Image.open(fp).convert("L")
             masks.append(m)
-        return masks
+        return masks  # Returns 18 masks (classes 1-19)
 
     def __getitem__(self, idx):
         img_name = self.images[idx]
@@ -272,7 +269,7 @@ def get_dataloaders_multilabel(
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=False,
+        pin_memory=True,
         drop_last=True,
     )
 
