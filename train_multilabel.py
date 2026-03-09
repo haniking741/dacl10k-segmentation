@@ -1,8 +1,6 @@
 """
-Training Script (MULTI-LABEL) for DACL10K U-Net
-- Uses dataset2/images + dataset2/masks_multilabel
-- Output channels = 19 (defects only, no background channel)
-- Supports CPU / CUDA (NVIDIA) / DirectML (AMD/Intel on Windows)
+Training Script (MULTI-LABEL) for DACL10K - 3 Classes
+Optimized for RTX 4070 with AMP
 """
 
 import os
@@ -11,13 +9,12 @@ import torch
 import torch.optim as optim
 import numpy as np
 from tqdm import tqdm
-
-from torch.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
 
 import config
-from models import get_model
+from models.deeplabv3 import get_model
 from data.dataset_multilabel import get_dataloaders_multilabel
-from utils.losses_multilabel import MultiLabelDiceLoss
+from utils.losses_multilabel import CombinedBCEDice
 from utils.metrics_multilabel import MultiLabelSegmentationMetrics
 
 
@@ -26,14 +23,10 @@ class Trainer:
         torch.manual_seed(config.RANDOM_SEED)
         np.random.seed(config.RANDOM_SEED)
 
-        # ---------------------------
         # Device selection
-        # ---------------------------
         self.device, self.device_type = self._get_device()
 
-        # ---------------------------
         # AMP: only effective on CUDA
-        # ---------------------------
         self.use_amp = bool(getattr(config, "USE_AMP", False)) and (self.device_type == "cuda")
         self.scaler = GradScaler(enabled=self.use_amp)
 
@@ -41,13 +34,11 @@ class Trainer:
         os.makedirs(config.SAVE_DIR, exist_ok=True)
         os.makedirs(getattr(config, "LOG_DIR", "logs"), exist_ok=True)
 
-        # Print config summary (NOW safe: use_amp exists)
+        # Print config
         self._print_config_summary()
 
-        # ---------------------------
         # Dataloaders
-        # ---------------------------
-        print("\n📂 Loading dataset (MULTI-LABEL)...")
+        print("\n📂 Loading dataset (MULTI-LABEL - 3 CLASSES)...")
         self.train_loader, self.val_loader, self.num_labels = get_dataloaders_multilabel(
             data_root=config.DATA_ROOT,
             batch_size=config.BATCH_SIZE,
@@ -62,26 +53,20 @@ class Trainer:
             min_defect_ratio=config.MIN_DEFECT_RATIO,
         )
 
-        # ---------------------------
         # Model
-        # ---------------------------
         print("\n📐 Creating model...")
         self.model = get_model(config.MODEL_TYPE, self.num_labels, self.device)
 
-        # ---------------------------
         # Loss / Optim / Scheduler
-        # ---------------------------
         self.criterion = self._get_criterion()
         self.optimizer = self._get_optimizer()
         self.scheduler = self._get_scheduler() if config.USE_SCHEDULER else None
 
-        # ---------------------------
         # Metrics
-        # ---------------------------
         self.metrics = MultiLabelSegmentationMetrics(
             num_classes=self.num_labels,
-            class_names=getattr(config, "CLASS_NAMES", None), # should be 19 names ideally
-            threshold=getattr(config, "THRESHOLD", 0.5),
+            class_names=getattr(config, "CLASS_NAMES", None),
+            threshold=getattr(config, "THRESHOLD", 0.25),
             ignore_empty=True,
         )
 
@@ -90,105 +75,73 @@ class Trainer:
         if self.use_amp:
             print("⚡ AMP enabled (CUDA)")
         else:
-            print("ℹ️ AMP disabled (CPU/DirectML)")
+            print("ℹ️ AMP disabled")
 
-    # ==========================================================
-    # DEVICE
-    # ==========================================================
     def _get_device(self):
-        # CPU mode forced
         if getattr(config, "CPU_MODE", False):
             print("🐌 CPU MODE forced")
             return torch.device("cpu"), "cpu"
 
-        # CUDA (NVIDIA)
         if torch.cuda.is_available():
             print("🚀 Using CUDA:", torch.cuda.get_device_name(0))
             return torch.device("cuda"), "cuda"
 
-        # DirectML (AMD/Intel on Windows)
         try:
             import torch_directml
             if torch_directml.is_available():
-                n = torch_directml.device_count()
-                print(f"🔍 Found {n} DirectML device(s)")
                 gpu_id = int(getattr(config, "GPU_ID", 0))
                 dev = torch_directml.device(gpu_id)
                 print(f"🎮 Using DirectML GPU {gpu_id}")
                 return dev, "directml"
-        except Exception as e:
-            print(f"⚠️ torch_directml not available ({e})")
+        except:
+            pass
 
-        print("⚠️ No CUDA/DirectML found, using CPU")
+        print("⚠️ No CUDA/DirectML, using CPU")
         return torch.device("cpu"), "cpu"
 
-    # ==========================================================
-    # PRINT CONFIG
-    # ==========================================================
     def _print_config_summary(self):
         print("\n" + "=" * 70)
-        print("TRAINING CONFIGURATION (MULTI-LABEL)")
+        print("TRAINING CONFIGURATION (MULTI-LABEL - 3 CLASSES)")
         print("=" * 70)
         print(f"Device: {self.device} (type={self.device_type})")
         print(f"Model: {config.MODEL_TYPE}")
+        print(f"Classes: {config.CLASS_NAMES}")
         print(f"IMG_SIZE: {config.IMG_SIZE}")
         print(f"BATCH: {config.BATCH_SIZE}")
         print(f"EPOCHS: {config.NUM_EPOCHS}")
         print(f"LR: {config.LEARNING_RATE}")
         print(f"OPT: {config.OPTIMIZER}")
         print(f"LOSS: {config.LOSS_TYPE}")
-        print(f"AMP: {getattr(config, 'USE_AMP', False)} (effective={self.use_amp})")
-        print(f"NUM_LABELS: {getattr(config, 'NUM_LABELS', 'auto')}")
+        print(f"AMP: {self.use_amp}")
+        print(f"Class Weights: {config.BCE_POS_WEIGHT}")
         print(f"NUM_WORKERS: {config.NUM_WORKERS}")
-        print(f"DATA_ROOT: {config.DATA_ROOT}")
         print("=" * 70)
 
-    # ==========================================================
-    # LOSS
-    # ==========================================================
     def _get_criterion(self):
-        lt = config.LOSS_TYPE.lower()
+        print("📊 Loss: BCE + Dice with class weights")
+        return CombinedBCEDice(
+            pos_weight=config.BCE_POS_WEIGHT,
+            smooth=config.DICE_SMOOTH,
+            w_bce=1.0,
+            w_dice=1.0
+        )
 
-        # BCE helper (supports pos_weight)
-        def bce_loss(logits, targets):
-            posw = getattr(config, "BCE_POS_WEIGHT", None)
-            posw_t = None
-            if posw is not None:
-                posw_t = torch.tensor(posw, dtype=torch.float32, device=logits.device)
-            return torch.nn.functional.binary_cross_entropy_with_logits(
-                logits, targets, pos_weight=posw_t
-            )
-
-        if lt == "bce":
-            print("📊 Loss: BCEWithLogits")
-            return bce_loss
-
-        if lt == "dice":
-            print("📊 Loss: MultiLabel Dice")
-            return MultiLabelDiceLoss(smooth=getattr(config, "DICE_SMOOTH", 1.0))
-
-        if lt == "bce_dice":
-            print("📊 Loss: BCE + Dice")
-            dice = MultiLabelDiceLoss(smooth=getattr(config, "DICE_SMOOTH", 1.0))
-
-            def loss_fn(logits, targets):
-                return 1.0 * bce_loss(logits, targets) + 1.0 * dice(logits, targets)
-
-            return loss_fn
-
-        raise ValueError(f"LOSS_TYPE must be: bce | dice | bce_dice, got {config.LOSS_TYPE}")
-
-    # ==========================================================
-    # OPTIMIZER
-    # ==========================================================
     def _get_optimizer(self):
-        if config.OPTIMIZER.lower() == "adam":
+        opt_name = config.OPTIMIZER.lower()
+        
+        if opt_name == "adam":
             opt = optim.Adam(
                 self.model.parameters(),
                 lr=config.LEARNING_RATE,
                 weight_decay=config.WEIGHT_DECAY
             )
-        elif config.OPTIMIZER.lower() == "sgd":
+        elif opt_name == "adamw":
+            opt = optim.AdamW(
+                self.model.parameters(),
+                lr=config.LEARNING_RATE,
+                weight_decay=config.WEIGHT_DECAY
+            )
+        elif opt_name == "sgd":
             opt = optim.SGD(
                 self.model.parameters(),
                 lr=config.LEARNING_RATE,
@@ -201,9 +154,6 @@ class Trainer:
         print(f"⚙️ Optimizer: {config.OPTIMIZER.upper()}, LR={config.LEARNING_RATE}")
         return opt
 
-    # ==========================================================
-    # SCHEDULER
-    # ==========================================================
     def _get_scheduler(self):
         st = config.SCHEDULER_TYPE.lower()
         if st == "cosine":
@@ -224,11 +174,8 @@ class Trainer:
                 factor=config.SCHEDULER_FACTOR,
                 patience=config.SCHEDULER_PATIENCE
             )
-        raise ValueError(f"Unknown scheduler type: {config.SCHEDULER_TYPE}")
+        raise ValueError(f"Unknown scheduler: {config.SCHEDULER_TYPE}")
 
-    # ==========================================================
-    # TRAIN / VAL
-    # ==========================================================
     def train_epoch(self, epoch):
         self.model.train()
         total = 0.0
@@ -279,27 +226,22 @@ class Trainer:
         metrics = self.metrics.get_metrics()
         return total / max(1, len(self.val_loader)), metrics
 
-    # ==========================================================
-    # CHECKPOINT
-    # ==========================================================
     def save_best(self, epoch, miou, metrics=None):
         path = os.path.join(config.SAVE_DIR, "checkpoint_best_multilabel.pth")
         torch.save(
             {
                 "epoch": epoch,
-                "model": self.model.state_dict(),   # only model
+                "model": self.model.state_dict(),
                 "best_miou": float(miou),
+                "num_labels": self.num_labels,
             },
             path
         )
-        print(f"💾 Saved BEST multilabel model (mIoU={miou:.4f}) -> {path}")
+        print(f"💾 Saved BEST model (mIoU={miou:.4f}) -> {path}")
 
-    # ==========================================================
-    # MAIN LOOP
-    # ==========================================================
     def train(self):
         print("\n" + "=" * 70)
-        print("🚀 START MULTI-LABEL TRAINING")
+        print("🚀 START MULTI-LABEL TRAINING (3 CLASSES)")
         print("=" * 70)
 
         no_imp = 0
@@ -307,10 +249,8 @@ class Trainer:
         for epoch in range(config.NUM_EPOCHS):
             t0 = time.time()
             tr_loss = self.train_epoch(epoch)
-
             val_loss, metrics = self.validate(epoch)
-        
-        # ✅ CRITICAL FIX - Change these lines:
+
             miou = metrics.get("mean_IoU", 0.0)
             mean_f1 = metrics.get("mean_F1", 0.0)
             mean_precision = metrics.get("mean_Precision", 0.0)
@@ -326,25 +266,31 @@ class Trainer:
             print(f" Time: {time.time() - t0:.1f}s")
             print(f" LR: {self.optimizer.param_groups[0]['lr']:.6f}")
 
+            # Per-class metrics
+            print(f"\n Per-Class Results:")
+            for cls in metrics['per_class']:
+                if cls['valid']:
+                    print(f"  {cls['name']:12s}: IoU={cls['IoU']:.4f}, F1={cls['F1']:.4f}")
+
             improved = miou > self.best_miou
             if improved:
-               self.best_miou = miou
-               no_imp = 0
-               self.save_best(epoch, miou, metrics)
+                self.best_miou = miou
+                no_imp = 0
+                self.save_best(epoch, miou, metrics)
             else:
                 no_imp += 1
 
             if self.scheduler is not None:
-               if config.SCHEDULER_TYPE.lower() == "plateau":
-                   self.scheduler.step(miou)
-               else:
-                   self.scheduler.step()
+                if config.SCHEDULER_TYPE.lower() == "plateau":
+                    self.scheduler.step(miou)
+                else:
+                    self.scheduler.step()
 
             if no_imp >= config.EARLY_STOPPING_PATIENCE:
-                print("⚠️ Early stopping (no improvement)")
+                print(f"\n⚠️ Early stopping (no improvement for {no_imp} epochs)")
                 break
 
-        print("\n✅ DONE. Best mIoU:", self.best_miou)
+        print(f"\n✅ DONE. Best mIoU: {self.best_miou:.4f}")
 
 
 if __name__ == "__main__":
