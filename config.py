@@ -69,4 +69,47 @@ LOSS_TYPE = "bce_dice"
 
 # From compute_class_weights.py
 # Order: [spalling, cavity, rust]
-BCE_POS_WEIGHT = [0.3260640869076145, 2.261665349
+BCE_POS_WEIGHT = [0.3260640869076145, 2.261665349089474, 0.41227056400291173]
+
+DICE_SMOOTH = 1.0
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# AUGMENTATION - ENHANCED! ✅
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DEFECT_CROP_PROB = 0.7
+CROP_RATIO = 0.60
+CROP_TRIES = 10
+MIN_DEFECT_RATIO = 0.01
+
+# Color augmentation
+USE_COLOR_JITTER = True
+COLOR_JITTER_BRIGHTNESS = 0.3
+COLOR_JITTER_CONTRAST = 0.3
+COLOR_JITTER_SATURATION = 0.3
+COLOR_JITTER_HUE = 0.1
+
+# Blur augmentation
+USE_RANDOM_BLUR = True
+BLUR_PROB = 0.3
+BLUR_KERNEL_SIZES = [3, 5, 7]
+
+# Noise augmentation
+USE_RANDOM_NOISE = True
+NOISE_PROB = 0.2
+NOISE_STD = 0.02
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# MIXED PRECISION (AMP) ✅
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+USE_AMP = True  # RTX 4070 has Tensor Cores
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# INFERENCE
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THRESHOLD = 0.25
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# MISC
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RANDOM_SEED = 42
+PRINT_FREQ = 20
