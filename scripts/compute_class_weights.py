@@ -14,6 +14,9 @@ Output:
 """
 
 import os
+=======
+import os
+import random
 import numpy as np
 from PIL import Image
 from pathlib import Path
@@ -210,6 +213,3 @@ def main():
         print("\nExpected improvement: +0.30-0.35 mIoU (from ~0.14 to ~0.45) ✅")
     else:
         print("\n❌ FAILED! Please check error messages above.")
-
-if __name__ == "__main__":
-    main()

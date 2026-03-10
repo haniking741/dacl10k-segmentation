@@ -10,10 +10,10 @@ import os
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PATHS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DATA_ROOT = r"C:\Users\Informatics\Desktop\dataset_mémoire\segmentation_project\dataset2"
+DATA_ROOT = r"C:\Users\PC\Desktop\hani_seg\dacl10k-segmentation\dataset2"
 MASKS_SUBDIR = "masks_multilabel"
 IMAGES_SUBDIR = "images"
-SAVE_DIR = "checkpoints"
+SAVE_DIR = "checkpoints2"
 LOG_DIR = "logs"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -36,15 +36,15 @@ MODEL_TYPE = "deeplabv3_resnet50"
 # HARDWARE - RTX 4070 CUDA ✅
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CPU_MODE = False
-GPU_ID = 0  # CUDA (not DirectML)
+GPU_ID = 1  # CUDA (not DirectML)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TRAINING - OPTIMIZED FOR 12GB VRAM ✅
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 IMG_SIZE = (512, 512)  # Higher resolution
-BATCH_SIZE = 8  # Larger batch
+BATCH_SIZE = 10  # Larger batch
 NUM_WORKERS = 8  # Multi-threaded loading
-NUM_EPOCHS = 50  # More epochs
+NUM_EPOCHS = 20  # More epochs
 EARLY_STOPPING_PATIENCE = 12
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -69,7 +69,7 @@ LOSS_TYPE = "bce_dice"
 
 # From compute_class_weights.py
 # Order: [spalling, cavity, rust]
-BCE_POS_WEIGHT = [0.3260640869076145, 2.261665349089474, 0.41227056400291173]
+BCE_POS_WEIGHT = [3.0, 6.0, 2.5]
 
 DICE_SMOOTH = 1.0
 
@@ -106,10 +106,14 @@ USE_AMP = True  # RTX 4070 has Tensor Cores
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # INFERENCE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-THRESHOLD = 0.25
+THRESHOLD = 0.5
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MISC
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RANDOM_SEED = 42
 PRINT_FREQ = 20
+
+# Create directories
+os.makedirs(SAVE_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)

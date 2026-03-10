@@ -1,6 +1,7 @@
 """
 Training Script (MULTI-LABEL) for DACL10K - 3 Classes
 Optimized for RTX 4070 with AMP
+Compatible with PyTorch 1.x and 2.x
 """
 
 import os
@@ -9,7 +10,16 @@ import torch
 import torch.optim as optim
 import numpy as np
 from tqdm import tqdm
-from torch.cuda.amp import autocast, GradScaler
+
+# ✅ FIXED: Compatible with older PyTorch versions
+try:
+    # PyTorch 2.x
+    from torch.amp import autocast, GradScaler
+    USE_NEW_AMP_API = True
+except ImportError:
+    # PyTorch 1.x (your version)
+    from torch.cuda.amp import autocast, GradScaler
+    USE_NEW_AMP_API = False
 
 import config
 from models.deeplabv3 import get_model
@@ -28,7 +38,15 @@ class Trainer:
 
         # AMP: only effective on CUDA
         self.use_amp = bool(getattr(config, "USE_AMP", False)) and (self.device_type == "cuda")
-        self.scaler = GradScaler(enabled=self.use_amp)
+        
+        # ✅ FIXED: Compatible GradScaler initialization
+        if self.use_amp:
+            if USE_NEW_AMP_API:
+                self.scaler = GradScaler('cuda')
+            else:
+                self.scaler = GradScaler()
+        else:
+            self.scaler = None
 
         # Create dirs
         os.makedirs(config.SAVE_DIR, exist_ok=True)
@@ -73,7 +91,8 @@ class Trainer:
         self.best_miou = 0.0
 
         if self.use_amp:
-            print("⚡ AMP enabled (CUDA)")
+            api_version = "PyTorch 2.x" if USE_NEW_AMP_API else "PyTorch 1.x"
+            print(f"⚡ AMP enabled (CUDA) - {api_version}")
         else:
             print("ℹ️ AMP disabled")
 
@@ -187,10 +206,19 @@ class Trainer:
 
             self.optimizer.zero_grad(set_to_none=True)
 
+            # ✅ FIXED: Compatible autocast usage
             if self.use_amp:
-                with autocast(device_type="cuda", enabled=True):
-                    logits = self.model(imgs)
-                    loss = self.criterion(logits, masks)
+                if USE_NEW_AMP_API:
+                    # PyTorch 2.x
+                    with autocast('cuda'):
+                        logits = self.model(imgs)
+                        loss = self.criterion(logits, masks)
+                else:
+                    # PyTorch 1.x (your version)
+                    with autocast():
+                        logits = self.model(imgs)
+                        loss = self.criterion(logits, masks)
+                
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
