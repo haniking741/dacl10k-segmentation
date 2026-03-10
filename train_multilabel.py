@@ -89,6 +89,11 @@ class Trainer:
         )
 
         self.best_miou = 0.0
+        self.start_epoch = 0
+
+        # ✅ NEW: Check for checkpoint before starting
+        checkpoint_path = os.path.join(config.SAVE_DIR, "checkpoint_best_multilabel.pth")
+        self.start_epoch = self.load_checkpoint(checkpoint_path)
 
         if self.use_amp:
             api_version = "PyTorch 2.x" if USE_NEW_AMP_API else "PyTorch 1.x"
@@ -96,26 +101,35 @@ class Trainer:
         else:
             print("ℹ️ AMP disabled")
 
+    def load_checkpoint(self, checkpoint_path):
+        """Loads weights, optimizer state, and best mIoU from disk"""
+        if os.path.exists(checkpoint_path):
+            print(f"🔄 Loading existing checkpoint: {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            
+            # Use .get() or check keys to avoid errors if keys were named differently before
+            model_key = 'model_state_dict' if 'model_state_dict' in checkpoint else 'model'
+            self.model.load_state_dict(checkpoint[model_key])
+            
+            if 'optimizer_state_dict' in checkpoint:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            self.best_miou = checkpoint.get('best_miou', 0.0)
+            epoch = checkpoint.get('epoch', 0)
+            
+            print(f"✅ Resumed from Epoch {epoch} (Best mIoU: {self.best_miou:.4f})")
+            return epoch + 1
+        else:
+            print("🆕 No checkpoint found. Starting training from scratch.")
+            return 0
+
     def _get_device(self):
         if getattr(config, "CPU_MODE", False):
             print("🐌 CPU MODE forced")
             return torch.device("cpu"), "cpu"
-
         if torch.cuda.is_available():
             print("🚀 Using CUDA:", torch.cuda.get_device_name(0))
             return torch.device("cuda"), "cuda"
-
-        try:
-            import torch_directml
-            if torch_directml.is_available():
-                gpu_id = int(getattr(config, "GPU_ID", 0))
-                dev = torch_directml.device(gpu_id)
-                print(f"🎮 Using DirectML GPU {gpu_id}")
-                return dev, "directml"
-        except:
-            pass
-
-        print("⚠️ No CUDA/DirectML, using CPU")
         return torch.device("cpu"), "cpu"
 
     def _print_config_summary(self):
@@ -147,29 +161,14 @@ class Trainer:
 
     def _get_optimizer(self):
         opt_name = config.OPTIMIZER.lower()
-        
         if opt_name == "adam":
-            opt = optim.Adam(
-                self.model.parameters(),
-                lr=config.LEARNING_RATE,
-                weight_decay=config.WEIGHT_DECAY
-            )
+            opt = optim.Adam(self.model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
         elif opt_name == "adamw":
-            opt = optim.AdamW(
-                self.model.parameters(),
-                lr=config.LEARNING_RATE,
-                weight_decay=config.WEIGHT_DECAY
-            )
+            opt = optim.AdamW(self.model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
         elif opt_name == "sgd":
-            opt = optim.SGD(
-                self.model.parameters(),
-                lr=config.LEARNING_RATE,
-                momentum=getattr(config, "MOMENTUM", 0.9),
-                weight_decay=config.WEIGHT_DECAY
-            )
+            opt = optim.SGD(self.model.parameters(), lr=config.LEARNING_RATE, momentum=getattr(config, "MOMENTUM", 0.9), weight_decay=config.WEIGHT_DECAY)
         else:
             raise ValueError(f"Unknown OPTIMIZER: {config.OPTIMIZER}")
-
         print(f"⚙️ Optimizer: {config.OPTIMIZER.upper()}, LR={config.LEARNING_RATE}")
         return opt
 
@@ -180,45 +179,29 @@ class Trainer:
             return optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=config.NUM_EPOCHS)
         if st == "step":
             print("📈 Scheduler: step")
-            return optim.lr_scheduler.StepLR(
-                self.optimizer,
-                step_size=config.SCHEDULER_STEP_SIZE,
-                gamma=config.SCHEDULER_FACTOR
-            )
+            return optim.lr_scheduler.StepLR(self.optimizer, step_size=config.SCHEDULER_STEP_SIZE, gamma=config.SCHEDULER_FACTOR)
         if st == "plateau":
             print("📈 Scheduler: plateau")
-            return optim.lr_scheduler.ReduceLROnPlateau(
-                self.optimizer,
-                mode="max",
-                factor=config.SCHEDULER_FACTOR,
-                patience=config.SCHEDULER_PATIENCE
-            )
+            return optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode="max", factor=config.SCHEDULER_FACTOR, patience=config.SCHEDULER_PATIENCE)
         raise ValueError(f"Unknown scheduler: {config.SCHEDULER_TYPE}")
 
     def train_epoch(self, epoch):
         self.model.train()
         total = 0.0
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{config.NUM_EPOCHS} [TRAIN]")
-
         for imgs, masks in pbar:
             imgs = imgs.to(self.device)
             masks = masks.to(self.device)
-
             self.optimizer.zero_grad(set_to_none=True)
-
-            # ✅ FIXED: Compatible autocast usage
             if self.use_amp:
                 if USE_NEW_AMP_API:
-                    # PyTorch 2.x
                     with autocast('cuda'):
                         logits = self.model(imgs)
                         loss = self.criterion(logits, masks)
                 else:
-                    # PyTorch 1.x (your version)
                     with autocast():
                         logits = self.model(imgs)
                         loss = self.criterion(logits, masks)
-                
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -227,10 +210,8 @@ class Trainer:
                 loss = self.criterion(logits, masks)
                 loss.backward()
                 self.optimizer.step()
-
             total += float(loss.item())
             pbar.set_postfix(loss=f"{loss.item():.4f}")
-
         return total / max(1, len(self.train_loader))
 
     @torch.no_grad()
@@ -238,67 +219,54 @@ class Trainer:
         self.model.eval()
         self.metrics.reset()
         total = 0.0
-
         pbar = tqdm(self.val_loader, desc=f"Epoch {epoch}/{config.NUM_EPOCHS} [VAL]")
         for imgs, masks in pbar:
             imgs = imgs.to(self.device)
             masks = masks.to(self.device)
-
             logits = self.model(imgs)
             loss = self.criterion(logits, masks)
             total += float(loss.item())
-
             self.metrics.update(logits, masks)
             pbar.set_postfix(loss=f"{loss.item():.4f}")
-
         metrics = self.metrics.get_metrics()
         return total / max(1, len(self.val_loader)), metrics
 
     def save_best(self, epoch, miou, metrics=None):
         path = os.path.join(config.SAVE_DIR, "checkpoint_best_multilabel.pth")
-        torch.save(
-            {
-                "epoch": epoch,
-                "model": self.model.state_dict(),
-                "best_miou": float(miou),
-                "num_labels": self.num_labels,
-            },
-            path
-        )
+        torch.save({
+            "epoch": epoch,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "best_miou": float(miou),
+            "num_labels": self.num_labels,
+        }, path)
         print(f"💾 Saved BEST model (mIoU={miou:.4f}) -> {path}")
 
     def train(self):
         print("\n" + "=" * 70)
-        print("🚀 START MULTI-LABEL TRAINING (3 CLASSES)")
+        print(f"🚀 START MULTI-LABEL TRAINING FROM EPOCH {self.start_epoch}")
         print("=" * 70)
 
         no_imp = 0
 
-        for epoch in range(config.NUM_EPOCHS):
+        # ✅ Start the loop from self.start_epoch
+        for epoch in range(self.start_epoch, config.NUM_EPOCHS):
             t0 = time.time()
             tr_loss = self.train_epoch(epoch)
             val_loss, metrics = self.validate(epoch)
 
             miou = metrics.get("mean_IoU", 0.0)
-            mean_f1 = metrics.get("mean_F1", 0.0)
-            mean_precision = metrics.get("mean_Precision", 0.0)
-            mean_recall = metrics.get("mean_Recall", 0.0)
-
+            
+            # Summary Print
             print(f"\n📊 Epoch {epoch} Summary:")
-            print(f" Train Loss: {tr_loss:.4f}")
-            print(f" Val Loss: {val_loss:.4f}")
-            print(f" mIoU: {miou:.4f}")
-            print(f" mean_F1: {mean_f1:.4f}")
-            print(f" mean_Precision: {mean_precision:.4f}")
-            print(f" mean_Recall: {mean_recall:.4f}")
-            print(f" Time: {time.time() - t0:.1f}s")
-            print(f" LR: {self.optimizer.param_groups[0]['lr']:.6f}")
+            print(f" Train Loss: {tr_loss:.4f} | Val Loss: {val_loss:.4f} | mIoU: {miou:.4f}")
+            print(f" LR: {self.optimizer.param_groups[0]['lr']:.6f} | Time: {time.time() - t0:.1f}s")
 
             # Per-class metrics
-            print(f"\n Per-Class Results:")
+            print(f" Per-Class IoU:")
             for cls in metrics['per_class']:
                 if cls['valid']:
-                    print(f"  {cls['name']:12s}: IoU={cls['IoU']:.4f}, F1={cls['F1']:.4f}")
+                    print(f"  {cls['name']:12s}: {cls['IoU']:.4f}")
 
             improved = miou > self.best_miou
             if improved:

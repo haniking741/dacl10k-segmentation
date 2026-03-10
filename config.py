@@ -69,7 +69,7 @@ LOSS_TYPE = "bce_dice"
 
 # From compute_class_weights.py
 # Order: [spalling, cavity, rust]
-BCE_POS_WEIGHT = [3.0, 6.0, 2.5]
+BCE_POS_WEIGHT = [6.16, 16.41, 6.95]
 
 DICE_SMOOTH = 1.0
 
