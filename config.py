@@ -10,7 +10,7 @@ import os
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PATHS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DATA_ROOT = r"C:\Users\PC\Desktop\hani_seg\dacl10k-segmentation\dataset2"
+DATA_ROOT = r"C:\Users\Informatics\Desktop\dataset_mémoire\segmentation_project\dataset2"
 MASKS_SUBDIR = "masks_multilabel"
 IMAGES_SUBDIR = "images"
 SAVE_DIR = "checkpoints2"
@@ -22,10 +22,10 @@ LOG_DIR = "logs"
 NUM_LABELS = 3
 
 # Class IDs from DACL10K (original dataset numbering)
-CLASSES_TO_LOAD = [7, 9, 11]  # spalling=7, cavity=9, rust=11
+CLASSES_TO_LOAD = [1, 7, 11]  # spalling=7, cavity=9, rust=11
 
 # Names (order matches CLASSES_TO_LOAD)
-CLASS_NAMES = ["spalling", "cavity", "rust"]
+CLASS_NAMES = ["crack", "spalling", "rust"]
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MODEL
@@ -68,8 +68,7 @@ SCHEDULER_STEP_SIZE = 10
 LOSS_TYPE = "bce_dice"
 
 # From compute_class_weights.py
-# Order: [spalling, cavity, rust]
-BCE_POS_WEIGHT = [6.16, 16.41, 6.95]
+BCE_POS_WEIGHT = [9.67, 6.16, 6.95]
 
 DICE_SMOOTH = 1.0
 
