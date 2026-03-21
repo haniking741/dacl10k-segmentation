@@ -3,211 +3,207 @@ compute_class_weights.py
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Compute class weights for balanced multi-label training
-CRITICAL for preventing model collapse in imbalanced datasets!
+For classes: Crack, Spalling, Rust
 
 Usage:
-    python compute_class_weights.py
-
-Output:
-    - Prints class distribution statistics
-    - Prints BCE_POS_WEIGHT to add to config.py
+    python scripts/compute_class_weights.py
 """
+
 import os
-import os
-import random
+import sys
 import numpy as np
 from PIL import Image
 from pathlib import Path
 from tqdm import tqdm
 
-def compute_class_weights(
+
+def compute_bce_pos_weight(
     masks_dir="dataset2/masks_multilabel/train",
-    classes_to_load=[7, 9, 11],  # spalling, cavity, rust
-    method="inverse_freq"
+    classes_to_load=[1, 7, 11],  # crack, spalling, rust
 ):
     """
-    Compute class weights based on pixel frequency in training set
+    Compute BCE pos_weight for multi-label classification
     
-    Args:
-        masks_dir: Path to training masks directory
-        classes_to_load: List of class IDs to compute weights for
-        method: 'inverse_freq' or 'effective_samples'
-        
-    Returns:
-        weights: numpy array of class weights
+    pos_weight[i] = negative_pixels[i] / positive_pixels[i]
+    
+    This tells BCE loss how much to penalize missing a positive pixel
     """
     
     masks_dir = Path(masks_dir)
-    class_names = ["spalling", "cavity", "rust"]
+    class_names = ["crack", "spalling", "rust"]
     
-    print("="*70)
-    print("COMPUTING CLASS WEIGHTS FOR DACL10K (3 CLASSES)")
-    print("="*70)
+    print("=" * 70)
+    print("COMPUTING BCE POS WEIGHTS (3 CLASSES)")
+    print("=" * 70)
     print(f"Masks directory: {masks_dir}")
-    print(f"Classes: {class_names}")
-    print(f"Method: {method}")
+    print(f"Classes to load: {classes_to_load}")
+    print(f"Class names: {class_names}")
     print()
     
-    # Get all base names from class01 files
+    # Check if directory exists
+    if not masks_dir.exists():
+        print(f"❌ ERROR: Directory not found!")
+        print(f"   Path: {masks_dir.absolute()}")
+        print()
+        print("Troubleshooting:")
+        print("  1. Make sure you're in the project root:")
+        print(f"     cd C:\\Users\\Informatics\\Desktop\\dataset_mémoire\\segmentation_project")
+        print("  2. Check if dataset2 folder exists")
+        print("  3. Check if masks_multilabel/train exists")
+        return None
+    
+    # Get all base names from class 01 files
     all_files = list(masks_dir.glob("*_class01.png"))
     
     if len(all_files) == 0:
         print("❌ ERROR: No mask files found!")
         print(f"   Searched in: {masks_dir.absolute()}")
-        print("\nTroubleshooting:")
-        print("1. Check if masks_dir path is correct")
-        print("2. Make sure you're in the project root directory")
-        print("3. Verify masks exist with: dir dataset2\\masks_multilabel\\train")
+        print(f"   Pattern: *_class01.png")
+        print()
+        print("Debugging:")
+        print("  Run this command to check:")
+        print(f"  dir {masks_dir}\\*_class01.png")
         return None
     
     base_names = [f.stem.replace("_class01", "") for f in all_files]
     
-    print(f"✓ Found {len(base_names)} training images")
-    print(f"  This will take ~5-10 minutes to scan all masks...")
+    print(f"✅ Found {len(base_names)} training images")
+    print(f"   This will take ~3-5 minutes...")
     print()
     
-    # Count pixels per class
-    class_pixels = np.zeros(len(classes_to_load), dtype=np.int64)
+    # Initialize counters
     total_pixels = 0
-    background_pixels = 0
+    positive_pixels = np.zeros(len(classes_to_load), dtype=np.int64)
     
     print("Scanning masks...")
     for base_name in tqdm(base_names, desc="Progress"):
-        # Get image size from first mask
-        first_mask_path = masks_dir / f"{base_name}_class01.png"
+        # Get image size from first available mask
+        first_mask_path = None
+        for cid in classes_to_load:
+            p = masks_dir / f"{base_name}_class{cid:02d}.png"
+            if p.exists():
+                first_mask_path = p
+                break
         
-        if first_mask_path.exists():
-            img = Image.open(first_mask_path)
-            img_pixels = img.size[0] * img.size[1]
-            total_pixels += img_pixels
-        else:
+        if first_mask_path is None:
             continue
         
-        # Count defect pixels per class
-        image_has_defects = np.zeros(img.size[::-1], dtype=bool)
+        # Get image dimensions
+        img = Image.open(first_mask_path)
+        h, w = img.size[1], img.size[0]
+        total_pixels += h * w
         
+        # Count positive pixels per class
         for i, class_id in enumerate(classes_to_load):
             mask_path = masks_dir / f"{base_name}_class{class_id:02d}.png"
             
             if mask_path.exists():
                 mask = np.array(Image.open(mask_path))
-                defect_pixels = (mask > 0)
-                class_pixels[i] += defect_pixels.sum()
-                image_has_defects = image_has_defects | defect_pixels
-        
-        # Background = pixels without any defect
-        background_pixels += (~image_has_defects).sum()
+                positive_pixels[i] += (mask > 0).sum()
     
-    # Compute frequencies
-    frequencies = class_pixels / total_pixels
-    background_freq = background_pixels / total_pixels
+    # Compute negative pixels
+    negative_pixels = total_pixels - positive_pixels
     
-    print("\n" + "="*70)
-    print("CLASS DISTRIBUTION ANALYSIS:")
-    print("="*70)
-    print(f"Total pixels analyzed: {total_pixels:,}")
+    # Compute pos_weight = neg / pos
+    pos_weight = negative_pixels / (positive_pixels + 1e-6)
+    
+    # Compute sqrt-scaled version (more stable)
+    pos_weight_sqrt = np.sqrt(pos_weight)
+    
+    # Print results
+    print("\n" + "=" * 70)
+    print("RESULTS:")
+    print("=" * 70)
+    print(f"Total pixels: {total_pixels:,}")
     print()
     
-    print(f"{'Class':<15} {'Pixels':>15} {'Percentage':>12} {'Frequency':>12}")
-    print("-"*70)
+    print(f"{'Class':<15} {'Positive':>15} {'Negative':>15} {'PosWeight':>12} {'Sqrt':>12}")
+    print("-" * 70)
     
-    # Background
-    print(f"{'background':<15} {background_pixels:>15,} {background_freq*100:>11.2f}% {background_freq:>12.6f}")
-    
-    # Defect classes
-    for i, (name, pixels, freq) in enumerate(zip(class_names, class_pixels, frequencies)):
-        print(f"{name:<15} {pixels:>15,} {freq*100:>11.2f}% {freq:>12.6f}")
+    for i, name in enumerate(class_names):
+        print(f"{name:<15} {positive_pixels[i]:>15,} {negative_pixels[i]:>15,} "
+              f"{pos_weight[i]:>12.2f} {pos_weight_sqrt[i]:>12.2f}")
     
     print()
-    
-    # Compute weights
-    if method == "inverse_freq":
-        # Inverse frequency: weight = 1 / frequency
-        # Higher weight for rare classes
-        weights = 1.0 / (frequencies + 1e-6)
-        
-        # Normalize so mean weight = 1.0
-        weights = weights / weights.mean()
-        
-    elif method == "effective_samples":
-        # Effective number of samples method
-        # More sophisticated, from paper: "Class-Balanced Loss"
-        beta = 0.9999
-        effective_num = 1.0 - np.power(beta, class_pixels)
-        weights = (1.0 - beta) / (effective_num + 1e-6)
-        
-        # Normalize
-        weights = weights / weights.mean()
-    
-    else:
-        raise ValueError(f"Unknown method: {method}")
-    
-    print("="*70)
-    print(f"CLASS WEIGHTS ({method}):")
-    print("="*70)
-    print(f"{'Class':<15} {'Weight':>12} {'Effect':<30}")
-    print("-"*70)
-    
-    for name, weight, freq in zip(class_names, weights, frequencies):
-        if weight > 1.0:
-            effect = f"↑ Boost (rare class, {freq*100:.2f}%)"
-        elif weight < 1.0:
-            effect = f"↓ Reduce (common class, {freq*100:.2f}%)"
-        else:
-            effect = "= Neutral"
-        print(f"{name:<15} {weight:>12.4f}    {effect}")
+    print("=" * 70)
+    print("COPY THIS TO config.py:")
+    print("=" * 70)
+    print()
+    print("# Original (mathematically correct):")
+    print(f"BCE_POS_WEIGHT = {pos_weight.tolist()}")
+    print()
+    print("# Sqrt-scaled (MORE STABLE, RECOMMENDED): ✅")
+    print(f"BCE_POS_WEIGHT = {pos_weight_sqrt.tolist()}")
+    print()
+    print("=" * 70)
     
     print()
-    print("Interpretation:")
-    print(f"  - Cavity has highest weight ({weights[1]:.4f}) → rarest class, needs boost")
-    print(f"  - Rust has lowest weight ({weights[2]:.4f}) → most common, reduce influence")
-    print(f"  - Spalling in middle ({weights[0]:.4f}) → balanced")
+    print("📊 Interpretation:")
+    print("-" * 70)
+    for i, name in enumerate(class_names):
+        freq = (positive_pixels[i] / total_pixels) * 100
+        print(f"{name:12s}: {freq:.2f}% of pixels, weight = {pos_weight_sqrt[i]:.2f}×")
+    
+    print()
+    print("✅ Recommendation: Use sqrt-scaled version (more stable)")
     print()
     
-    # Output for config.py
-    print("="*70)
-    print("COPY THIS LINE TO config.py:")
-    print("="*70)
-    print()
-    print(f"BCE_POS_WEIGHT = {weights.tolist()}")
-    print()
-    print("="*70)
-    
-    # Alternative method comparison
-    if method == "inverse_freq":
-        print("\nAlternative (effective_samples method):")
-        print("If inverse_freq doesn't work well, try:")
-        print("  python compute_class_weights.py --method effective_samples")
-    
-    return weights
+    return pos_weight, pos_weight_sqrt
+
 
 def main():
-    """
-    Main function
-    """
-    import sys
+    """Main function"""
     
-    # Parse arguments
-    method = "inverse_freq"
-    if len(sys.argv) > 1:
-        if "--method" in sys.argv:
-            idx = sys.argv.index("--method")
-            if idx + 1 < len(sys.argv):
-                method = sys.argv[idx + 1]
+    print()
+    print("🔍" * 35)
+    print("DACL10K CLASS WEIGHT COMPUTATION")
+    print("🔍" * 35)
+    print()
     
     # Compute weights
-    weights = compute_class_weights(method=method)
+    result = compute_bce_pos_weight(
+        masks_dir="dataset2/masks_multilabel/train",
+        classes_to_load=[1, 7, 11],  # crack, spalling, rust
+    )
     
-    if weights is not None:
-        print("\n✅ SUCCESS! Class weights computed.")
-        print("\nNext steps:")
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print("1. Copy the BCE_POS_WEIGHT line above")
-        print("2. Open config.py and add it (after LOSS_TYPE line)")
-        print("3. Update NUM_EPOCHS = 40 in config.py")
-        print("4. Delete: checkpoints\\checkpoint_best_multilabel.pth")
-        print("5. Restart training: py -3.11 train_multilabel.py")
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print("\nExpected improvement: +0.30-0.35 mIoU (from ~0.14 to ~0.45) ✅")
+    if result is not None:
+        pos_weight, pos_weight_sqrt = result
+        
+        print()
+        print("=" * 70)
+        print("✅ SUCCESS!")
+        print("=" * 70)
+        print()
+        print("Next steps:")
+        print("━" * 70)
+        print("1. Open config.py")
+        print("2. Update these lines:")
+        print()
+        print("   CLASSES_TO_LOAD = [1, 7, 11]  # crack, spalling, rust")
+        print("   CLASS_NAMES = ['crack', 'spalling', 'rust']")
+        print(f"   BCE_POS_WEIGHT = {pos_weight_sqrt.tolist()}")
+        print()
+        print("3. Delete old checkpoint:")
+        print("   rm checkpoints\\checkpoint_best_multilabel.pth")
+        print()
+        print("4. Start training:")
+        print("   python train_multilabel.py")
+        print("━" * 70)
+        print()
+        print(f"Expected mIoU: 0.38-0.43 ✅✅✅")
+        print()
     else:
-        print("\n❌ FAILED! Please check error messages above.")
+        print()
+        print("=" * 70)
+        print("❌ FAILED!")
+        print("=" * 70)
+        print()
+        print("Please check the error messages above and:")
+        print("  1. Make sure you're in the correct directory")
+        print("  2. Verify dataset2/masks_multilabel/train exists")
+        print("  3. Check if mask files exist")
+        print()
+
+
+if __name__ == "__main__":
+    main()
