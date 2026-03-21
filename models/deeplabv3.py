@@ -1,139 +1,175 @@
 """
-DeepLabV3+ Implementation for Multi-label Semantic Segmentation
-Uses pretrained ResNet backbone from torchvision
+DeepLabV3+ for Multi-label Semantic Segmentation
+
+FIXES APPLIED:
+  [BUG #2] Auxiliary head output is no longer discarded.
+           forward() now returns (main_out, aux_out) during training
+           so train_multilabel.py can compute aux loss (weight 0.4)
+           and feed proper gradient signal into the backbone.
+  [BUG #4] Replaced deprecated pretrained=True with the new
+           weights=DeepLabV3_ResNet50_Weights.DEFAULT API so
+           ImageNet weights are actually loaded on every torchvision version.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models.segmentation import deeplabv3_resnet50, deeplabv3_resnet101
+
+# ✅ FIX #4: new weights API (works on torchvision ≥ 0.13)
+try:
+    from torchvision.models.segmentation import (
+        deeplabv3_resnet50,
+        deeplabv3_resnet101,
+        DeepLabV3_ResNet50_Weights,
+        DeepLabV3_ResNet101_Weights,
+    )
+    NEW_WEIGHTS_API = True
+except ImportError:
+    # torchvision < 0.13 fallback
+    from torchvision.models.segmentation import deeplabv3_resnet50, deeplabv3_resnet101
+    NEW_WEIGHTS_API = False
 
 
 class DeepLabV3Plus(nn.Module):
     """
-    DeepLabV3+ for multi-label segmentation
-    
-    Args:
-        n_classes: Number of output classes
-        backbone: 'resnet50' or 'resnet101'
-        pretrained: Use ImageNet pretrained weights
+    DeepLabV3+ wrapper for multi-label segmentation.
+
+    forward() returns:
+      - Training  : (main_logits [B,C,H,W], aux_logits [B,C,H,W])
+      - Inference : main_logits [B,C,H,W]   (call model.eval() first)
+
+    This allows train_multilabel.py to add the auxiliary loss:
+        loss = criterion(main) + 0.4 * criterion(aux)
+    giving the ResNet backbone a much stronger gradient signal.
     """
-    
-    def __init__(self, n_classes=19, backbone='resnet50', pretrained=True):
-        super(DeepLabV3Plus, self).__init__()
-        
+
+    def __init__(self, n_classes=3, backbone='resnet50', pretrained=True):
+        super().__init__()
         self.n_classes = n_classes
-        
-        # Load pretrained DeepLabV3 from torchvision
+
+        # ─── Build backbone ───────────────────────────────────────────────
         if backbone == 'resnet50':
-            self.model = deeplabv3_resnet50(pretrained=pretrained, progress=True)
+            if NEW_WEIGHTS_API:
+                w = DeepLabV3_ResNet50_Weights.DEFAULT if pretrained else None
+                self.model = deeplabv3_resnet50(weights=w)
+            else:
+                self.model = deeplabv3_resnet50(pretrained=pretrained, progress=True)
+
         elif backbone == 'resnet101':
-            self.model = deeplabv3_resnet101(pretrained=pretrained, progress=True)
+            if NEW_WEIGHTS_API:
+                w = DeepLabV3_ResNet101_Weights.DEFAULT if pretrained else None
+                self.model = deeplabv3_resnet101(weights=w)
+            else:
+                self.model = deeplabv3_resnet101(pretrained=pretrained, progress=True)
         else:
             raise ValueError(f"Unknown backbone: {backbone}")
-        
-        # Replace classifier to match our number of classes
-        # Original has 21 classes (PASCAL VOC), we need n_classes
+
+        # ─── Replace main classifier head ─────────────────────────────────
+        # torchvision DeepLabV3 classifier is an ASPP module;
+        # the final Conv2d is at index [4].
         in_channels = self.model.classifier[4].in_channels
-        
-        self.model.classifier[4] = nn.Conv2d(
-            in_channels, 
-            n_classes, 
-            kernel_size=1
-        )
-        
-        # Also update auxiliary classifier if it exists
-        if hasattr(self.model, 'aux_classifier'):
-            aux_in_channels = self.model.aux_classifier[4].in_channels
-            self.model.aux_classifier[4] = nn.Conv2d(
-                aux_in_channels,
-                n_classes,
-                kernel_size=1
-            )
-    
+        self.model.classifier[4] = nn.Conv2d(in_channels, n_classes, kernel_size=1)
+
+        # ─── Replace auxiliary classifier head ────────────────────────────
+        # ✅ FIX #2: keep aux_classifier alive and replace its head
+        # so that we can actually use it for aux loss during training.
+        if hasattr(self.model, 'aux_classifier') and self.model.aux_classifier is not None:
+            aux_in = self.model.aux_classifier[4].in_channels
+            self.model.aux_classifier[4] = nn.Conv2d(aux_in, n_classes, kernel_size=1)
+            self._has_aux = True
+        else:
+            self._has_aux = False
+
     def forward(self, x):
         """
-        Forward pass
-        
         Args:
-            x: Input tensor [B, 3, H, W]
-            
-        Returns:
-            Output tensor [B, n_classes, H, W]
-        """
-        input_shape = x.shape[-2:]  # H, W
-        
-        # Forward through model
-        output = self.model(x)
-        
-        # DeepLabV3 returns a dict with 'out' and optionally 'aux'
-        # We only need 'out' for inference
-        if isinstance(output, dict):
-            output = output['out']
-        
-        # Resize to input size if needed
-        if output.shape[-2:] != input_shape:
-            output = F.interpolate(
-                output, 
-                size=input_shape, 
-                mode='bilinear', 
-                align_corners=False
-            )
-        
-        return output
+            x: [B, 3, H, W]
 
+        Returns (training mode):
+            (main_logits, aux_logits)  — both [B, n_classes, H, W]
+
+        Returns (eval mode):
+            main_logits                — [B, n_classes, H, W]
+        """
+        input_shape = x.shape[-2:]
+
+        output_dict = self.model(x)   # always a dict: {'out': ..., 'aux': ...}
+
+        # ── Main output ───────────────────────────────────────────────────
+        main = output_dict['out']
+        if main.shape[-2:] != input_shape:
+            main = F.interpolate(main, size=input_shape, mode='bilinear', align_corners=False)
+
+        # ── Auxiliary output ──────────────────────────────────────────────
+        # ✅ FIX #2: return aux during training instead of discarding it
+        if self.training and self._has_aux and 'aux' in output_dict:
+            aux = output_dict['aux']
+            if aux.shape[-2:] != input_shape:
+                aux = F.interpolate(aux, size=input_shape, mode='bilinear', align_corners=False)
+            return main, aux
+
+        # Eval mode: return only main logits (standard behaviour)
+        return main
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 def count_parameters(model):
-    """Count trainable parameters"""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def get_deeplabv3(n_classes=19, backbone='resnet50', pretrained=True, device='cpu'):
+def get_model(model_type: str, n_classes: int, device):
     """
-    Factory function to create DeepLabV3+ model
-    
-    Args:
-        n_classes: Number of output classes
-        backbone: 'resnet50' (faster) or 'resnet101' (better)
-        pretrained: Use ImageNet pretrained weights
-        device: Device to load model on
-        
-    Returns:
-        DeepLabV3+ model
+    Factory used by train_multilabel.py.
+
+    model_type examples: 'deeplabv3_resnet50', 'deeplabv3_resnet101'
     """
-    print(f"📐 Creating DeepLabV3+ with {backbone} backbone")
-    
-    model = DeepLabV3Plus(
-        n_classes=n_classes,
-        backbone=backbone,
-        pretrained=pretrained
-    )
-    
+    model_type = model_type.lower()
+
+    if 'resnet101' in model_type:
+        backbone = 'resnet101'
+    else:
+        backbone = 'resnet50'
+
+    print(f"📐 Building DeepLabV3+ | backbone={backbone} | classes={n_classes}")
+
+    model = DeepLabV3Plus(n_classes=n_classes, backbone=backbone, pretrained=True)
     n_params = count_parameters(model)
-    print(f"📊 Parameters: {n_params:,} ({n_params/1e6:.2f}M)")
-    
+    print(f"📊 Trainable parameters: {n_params:,}  ({n_params / 1e6:.1f}M)")
+
     model = model.to(device)
-    
     return model
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Quick self-test
+# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Test the model
-    print("Testing DeepLabV3+ model...\n")
-    
-    model = get_deeplabv3(n_classes=19, backbone='resnet50', device='cpu')
-    
-    # Test forward pass
-    x = torch.randn(2, 3, 384, 384)
-    print(f"Input shape: {x.shape}")
-    
+    print("=== DeepLabV3+ self-test ===\n")
+
+    model = get_model('deeplabv3_resnet50', n_classes=3, device='cpu')
+
+    x = torch.randn(2, 3, 512, 512)
+    print(f"Input : {x.shape}")
+
+    # --- Training mode (returns tuple) ---
+    model.train()
     with torch.no_grad():
         out = model(x)
-    
-    print(f"Output shape: {out.shape}")
-    print(f"Expected: [2, 19, 384, 384]")
-    
-    if out.shape == torch.Size([2, 19, 384, 384]):
-        print("\n✅ Model working correctly!")
+
+    if isinstance(out, tuple):
+        main, aux = out
+        print(f"Train  → main: {main.shape}  aux: {aux.shape}")
+        assert main.shape == torch.Size([2, 3, 512, 512]), "main shape wrong"
+        assert aux.shape  == torch.Size([2, 3, 512, 512]), "aux shape wrong"
     else:
-        print("\n❌ Model output shape incorrect!")
+        print(f"Train  → {out.shape}  (no aux head)")
+
+    # --- Eval mode (returns tensor) ---
+    model.eval()
+    with torch.no_grad():
+        out = model(x)
+    print(f"Eval   → {out.shape}")
+    assert out.shape == torch.Size([2, 3, 512, 512]), "eval shape wrong"
+
+    print("\n✅ All checks passed!")

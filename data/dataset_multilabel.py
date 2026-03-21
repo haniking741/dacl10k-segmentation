@@ -1,6 +1,13 @@
 """
 Multi-label Dataset Loader for DACL10K (3 CLASSES)
-Loads only: spalling (7), cavity (9), rust (11)
+Loads only: crack (1), spalling (7), rust (11)
+
+FIXES APPLIED:
+  [BUG #1] Noise is now applied BEFORE normalization, clamped to [0,1]
+           → Previously, clamp(0,1) after normalize() was destroying the
+             ImageNet-normalized range (~[-2.1, 2.6]), corrupting 20% of batches.
+  [BUG #6] Empty fallback mask now uses actual image.size instead of
+           hardcoded (512,512) → prevents shape mismatch before resize.
 """
 
 import os
@@ -30,14 +37,13 @@ class DACL10KMultiLabelDataset(Dataset):
     ):
         self.img_dir = img_dir
         self.mask_dir = mask_dir
-        
-        # Import config here to avoid circular import
+
         import config
         if classes_to_load is None:
             classes_to_load = getattr(config, 'CLASSES_TO_LOAD', [1, 7, 11])
         self.classes_to_load = list(classes_to_load)
         self.num_labels = len(self.classes_to_load)
-        
+
         self.transform = bool(transform)
         self.img_size = tuple(img_size)
         self.defect_crop_prob = float(defect_crop_prob)
@@ -55,31 +61,34 @@ class DACL10KMultiLabelDataset(Dataset):
     def __len__(self):
         return len(self.images)
 
-    def _load_multilabel_masks(self, base_name):
-        """Load only the 3 specified classes"""
+    def _load_multilabel_masks(self, base_name, image_size):
+        """
+        Load only the specified classes.
+        image_size: (W, H) from image.size — used for fallback empty mask.
+
+        BUG #6 FIX: empty mask now matches actual image dimensions,
+        not a hardcoded (512, 512).
+        """
         masks = []
         for class_id in self.classes_to_load:
             fn = f"{base_name}_class{class_id:02d}.png"
             fp = os.path.join(self.mask_dir, fn)
-            
+
             if os.path.exists(fp):
                 m = Image.open(fp).convert("L")
             else:
-                # Create empty mask if file doesn't exist
-                m = Image.new('L', (512, 512), 0)
-            
+                # ✅ FIX: use real image size, not hardcoded 512x512
+                m = Image.new('L', image_size, 0)
+
             masks.append(m)
-        
         return masks
 
     def _random_crop(self, image, masks, crop_h, crop_w):
         w, h = image.size
         if h <= crop_h or w <= crop_w:
             return image, masks
-
         top = random.randint(0, h - crop_h)
         left = random.randint(0, w - crop_w)
-
         image_c = TF.crop(image, top, left, crop_h, crop_w)
         masks_c = [TF.crop(m, top, left, crop_h, crop_w) for m in masks]
         return image_c, masks_c
@@ -127,7 +136,7 @@ class DACL10KMultiLabelDataset(Dataset):
 
     def _apply_transforms(self, image, masks):
         import config
-        
+
         crop_h = max(64, int(self.img_size[0] * self.crop_ratio))
         crop_w = max(64, int(self.img_size[1] * self.crop_ratio))
 
@@ -136,7 +145,7 @@ class DACL10KMultiLabelDataset(Dataset):
             image, masks = self._defect_focused_crop(
                 image, masks, crop_h, crop_w,
                 tries=self.crop_tries,
-                min_defect_ratio=self.min_defect_ratio
+                min_defect_ratio=self.min_defect_ratio,
             )
         else:
             image, masks = self._random_crop(image, masks, crop_h, crop_w)
@@ -145,32 +154,33 @@ class DACL10KMultiLabelDataset(Dataset):
         image = TF.resize(image, self.img_size)
         masks = [TF.resize(m, self.img_size, interpolation=Image.NEAREST) for m in masks]
 
-        # Flips
+        # Horizontal flip
         if random.random() > 0.5:
             image = TF.hflip(image)
             masks = [TF.hflip(m) for m in masks]
 
+        # Vertical flip
         if random.random() > 0.5:
             image = TF.vflip(image)
             masks = [TF.vflip(m) for m in masks]
 
-        # Rotate
+        # Rotation
         if random.random() > 0.5:
             angle = random.uniform(-15, 15)
             image = TF.rotate(image, angle)
             masks = [TF.rotate(m, angle, interpolation=Image.NEAREST) for m in masks]
 
-        # Color Jitter
+        # Color Jitter (applied while still PIL Image)
         if getattr(config, 'USE_COLOR_JITTER', False):
             if random.random() > 0.5:
                 image = T.ColorJitter(
                     brightness=getattr(config, 'COLOR_JITTER_BRIGHTNESS', 0.3),
                     contrast=getattr(config, 'COLOR_JITTER_CONTRAST', 0.3),
                     saturation=getattr(config, 'COLOR_JITTER_SATURATION', 0.3),
-                    hue=getattr(config, 'COLOR_JITTER_HUE', 0.1)
+                    hue=getattr(config, 'COLOR_JITTER_HUE', 0.1),
                 )(image)
 
-        # Random Blur
+        # Gaussian Blur (still PIL)
         if getattr(config, 'USE_RANDOM_BLUR', False):
             if random.random() < getattr(config, 'BLUR_PROB', 0.3):
                 kernel_sizes = getattr(config, 'BLUR_KERNEL_SIZES', [3, 5, 7])
@@ -181,13 +191,15 @@ class DACL10KMultiLabelDataset(Dataset):
 
     def __getitem__(self, idx):
         import config
-        
+
         img_name = self.images[idx]
         img_path = os.path.join(self.img_dir, img_name)
         image = Image.open(img_path).convert("RGB")
 
         base = os.path.splitext(img_name)[0]
-        masks = self._load_multilabel_masks(base)
+
+        # ✅ Pass actual image.size (W,H) for correct empty mask fallback
+        masks = self._load_multilabel_masks(base, image.size)
 
         if self.transform:
             image, masks = self._apply_transforms(image, masks)
@@ -195,22 +207,27 @@ class DACL10KMultiLabelDataset(Dataset):
             image = TF.resize(image, self.img_size)
             masks = [TF.resize(m, self.img_size, interpolation=Image.NEAREST) for m in masks]
 
-        # Image -> tensor + normalize
+        # ─────────────────────────────────────────────────────────────────
+        # BUG #1 FIX: Apply noise BEFORE normalization, clamp to [0,1]
+        # ─────────────────────────────────────────────────────────────────
+        # Convert to tensor first (values in [0.0, 1.0])
         image = TF.to_tensor(image)
-        image = TF.normalize(
-            image,
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
 
-        # Random Noise
+        # ✅ Noise added here — while values are still in [0,1]
         if self.transform and getattr(config, 'USE_RANDOM_NOISE', False):
             if random.random() < getattr(config, 'NOISE_PROB', 0.2):
                 noise = torch.randn_like(image) * getattr(config, 'NOISE_STD', 0.02)
-                image = image + noise
-                image = torch.clamp(image, 0, 1)
+                image = torch.clamp(image + noise, 0.0, 1.0)  # safe clamp
 
-        # Masks -> [C,H,W]
+        # ✅ Normalize AFTER noise — backbone sees correct distribution
+        image = TF.normalize(
+            image,
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+        )
+        # ─────────────────────────────────────────────────────────────────
+
+        # Masks → [C, H, W] float32 binary tensor
         masks_t = []
         for m in masks:
             arr = np.array(m, dtype=np.uint8)
@@ -219,6 +236,8 @@ class DACL10KMultiLabelDataset(Dataset):
 
         return image, masks_t
 
+
+# ──────────────────────────────────────────────────────────────────────────────
 
 def get_dataloaders_multilabel(
     data_root,
@@ -234,19 +253,19 @@ def get_dataloaders_multilabel(
     min_defect_ratio=0.01,
 ):
     import config
-    
+
     if cpu_mode:
         img_size = (256, 256)
         batch_size = 1
         num_workers = 0
         print("🐌 CPU MODE: 256x256, batch_size=1")
 
-    train_img_dir = os.path.join(data_root, images_subdir, "train")
-    val_img_dir = os.path.join(data_root, images_subdir, "val")
+    train_img_dir  = os.path.join(data_root, images_subdir, "train")
+    val_img_dir    = os.path.join(data_root, images_subdir, "val")
     train_mask_dir = os.path.join(data_root, masks_subdir, "train")
-    val_mask_dir = os.path.join(data_root, masks_subdir, "val")
+    val_mask_dir   = os.path.join(data_root, masks_subdir, "val")
 
-    classes_to_load = getattr(config, 'CLASSES_TO_LOAD', [7, 9, 11])
+    classes_to_load = getattr(config, 'CLASSES_TO_LOAD', [1, 7, 11])
     num_labels = len(classes_to_load)
 
     train_ds = DACL10KMultiLabelDataset(
@@ -267,10 +286,6 @@ def get_dataloaders_multilabel(
         classes_to_load=classes_to_load,
         transform=False,
         img_size=img_size,
-        defect_crop_prob=0.0,
-        crop_ratio=crop_ratio,
-        crop_tries=crop_tries,
-        min_defect_ratio=min_defect_ratio,
     )
 
     pin_mem = not cpu_mode
@@ -293,9 +308,9 @@ def get_dataloaders_multilabel(
         drop_last=False,
     )
 
-    print(f"✅ Train: {len(train_ds)} images, {len(train_loader)} batches")
-    print(f"✅ Val: {len(val_ds)} images, {len(val_loader)} batches")
-    print(f"✅ Image size: {img_size}")
-    print(f"✅ Num labels: {num_labels} (classes: {classes_to_load})")
-    
+    print(f"✅ Train : {len(train_ds)} images | {len(train_loader)} batches")
+    print(f"✅ Val   : {len(val_ds)} images | {len(val_loader)} batches")
+    print(f"✅ Image size : {img_size}")
+    print(f"✅ Num labels : {num_labels}  (classes: {classes_to_load})")
+
     return train_loader, val_loader, num_labels
