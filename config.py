@@ -2,7 +2,7 @@
 Training Configuration for DACL10K Multi-Label (3 CLASSES)
 Optimized for Kaggle GPU (Tesla T4 or P100)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Classes: spalling (7), cavity (9), rust (11)
+Classes: crack (5), spalling (7), rust (11)
 """
 
 import os
@@ -10,19 +10,19 @@ import os
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PATHS – Kaggle dataset (read‑only) + working directories
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DATA_ROOT = "/kaggle/input/datasets/hanihafnaoui/hani-dataset/dataset2"
+DATA_ROOT = "/kaggle/input/hani-dataset/dataset2"          # adjust if dataset name differs
 MASKS_SUBDIR = "masks_multilabel"
 IMAGES_SUBDIR = "images"
-SAVE_DIR = "/kaggle/working/checkpoints2"      # writable
-LOG_DIR = "/kaggle/working/logs"               # writable
+SAVE_DIR = "/kaggle/working/checkpoints2"                  # writable
+LOG_DIR = "/kaggle/working/logs"                           # writable
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# DATASET – 3 CLASSES (based on original DACL10K IDs)
+# DATASET – 3 CLASSES (corrected IDs)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 NUM_LABELS = 3
 
 # Class IDs from DACL10K (original dataset numbering)
-CLASSES_TO_LOAD = [1, 7, 11]    # crack=1, spalling=7, rust=11
+CLASSES_TO_LOAD = [5, 7, 11]          # crack=5, spalling=7, rust=11
 
 # Names (order matches CLASSES_TO_LOAD)
 CLASS_NAMES = ["crack", "spalling", "rust"]
@@ -42,9 +42,9 @@ GPU_ID = 0                     # Kaggle only has one GPU
 # TRAINING – adjusted for Kaggle memory (max ~16GB VRAM)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 IMG_SIZE = (512, 512)          # keep high resolution
-BATCH_SIZE = 8                 # slightly reduced for safety
+BATCH_SIZE = 8                 # safe for Tesla T4 (12‑16GB VRAM)
 NUM_WORKERS = 4                # Kaggle CPU is shared, avoid over‑subscribing
-NUM_EPOCHS = 20
+NUM_EPOCHS = 50
 EARLY_STOPPING_PATIENCE = 12
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -62,10 +62,11 @@ SCHEDULER_PATIENCE = 5
 SCHEDULER_STEP_SIZE = 10
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# LOSS – class weights (keep as computed earlier)
+# LOSS – class weights (computed for classes 5,7,11)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 LOSS_TYPE = "bce_dice"
-BCE_POS_WEIGHT = [9.67, 6.16, 6.95]   # order: crack, spalling, rust
+# Weights computed using compute_class_weights.py (sqrt-scaled)
+BCE_POS_WEIGHT = [3.12, 1.98, 2.45]   # order: crack, spalling, rust
 DICE_SMOOTH = 1.0
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
