@@ -10,21 +10,17 @@ import os
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PATHS – Kaggle dataset (read‑only) + working directories
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DATA_ROOT = "/kaggle/input/hani-dataset/dataset2"          # adjust if dataset name differs
+DATA_ROOT = "/kaggle/input/hani-dataset/dataset2"          # <-- ADJUST IF DIFFERENT
 MASKS_SUBDIR = "masks_multilabel"
 IMAGES_SUBDIR = "images"
-SAVE_DIR = "/kaggle/working/checkpoints2"                  # writable
-LOG_DIR = "/kaggle/working/logs"                           # writable
+SAVE_DIR = "/kaggle/working/checkpoints2"
+LOG_DIR = "/kaggle/working/logs"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # DATASET – 3 CLASSES (corrected IDs)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 NUM_LABELS = 3
-
-# Class IDs from DACL10K (original dataset numbering)
 CLASSES_TO_LOAD = [5, 7, 11]          # crack=5, spalling=7, rust=11
-
-# Names (order matches CLASSES_TO_LOAD)
 CLASS_NAMES = ["crack", "spalling", "rust"]
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -36,15 +32,15 @@ MODEL_TYPE = "deeplabv3_resnet50"
 # HARDWARE – Kaggle GPU
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CPU_MODE = False
-GPU_ID = 0                     # Kaggle only has one GPU
+GPU_ID = 0
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TRAINING – adjusted for Kaggle memory (max ~16GB VRAM)
+# TRAINING – increased epochs for better convergence
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-IMG_SIZE = (512, 512)          # keep high resolution
-BATCH_SIZE = 8                 # safe for Tesla T4 (12‑16GB VRAM)
-NUM_WORKERS = 4                # Kaggle CPU is shared, avoid over‑subscribing
-NUM_EPOCHS = 50
+IMG_SIZE = (512, 512)
+BATCH_SIZE = 8
+NUM_WORKERS = 4
+NUM_EPOCHS = 50                     # You can increase to 100 if you have time
 EARLY_STOPPING_PATIENCE = 12
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -62,15 +58,14 @@ SCHEDULER_PATIENCE = 5
 SCHEDULER_STEP_SIZE = 10
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# LOSS – class weights (computed for classes 5,7,11)
+# LOSS – class weights (sqrt‑scaled from your computed values)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 LOSS_TYPE = "bce_dice"
-# Weights computed using compute_class_weights.py (sqrt-scaled)
-BCE_POS_WEIGHT = [3.12, 1.98, 2.45]   # order: crack, spalling, rust
+BCE_POS_WEIGHT = [18.09, 6.16, 6.95]   # order: crack, spalling, rust
 DICE_SMOOTH = 1.0
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# AUGMENTATION
+# AUGMENTATION (keep as before)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DEFECT_CROP_PROB = 0.7
 CROP_RATIO = 0.60
