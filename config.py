@@ -10,7 +10,7 @@ import os
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PATHS – Kaggle dataset (read‑only) + working directories
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DATA_ROOT = "/kaggle/input/hani-dataset/dataset2"          # <-- ADJUST IF DIFFERENT
+DATA_ROOT = "/kaggle/input/hani_dataset/dataset2"          # <-- ADJUST IF DIFFERENT
 MASKS_SUBDIR = "masks_multilabel"
 IMAGES_SUBDIR = "images"
 SAVE_DIR = "/kaggle/working/checkpoints2"
