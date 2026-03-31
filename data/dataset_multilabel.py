@@ -40,7 +40,7 @@ class DACL10KMultiLabelDataset(Dataset):
 
         import config
         if classes_to_load is None:
-            classes_to_load = getattr(config, 'CLASSES_TO_LOAD', [1, 7, 11])
+            classes_to_load = getattr(config, 'CLASSES_TO_LOAD', [5, 7, 11])
         self.classes_to_load = list(classes_to_load)
         self.num_labels = len(self.classes_to_load)
 
