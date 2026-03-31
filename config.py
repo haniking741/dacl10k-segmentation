@@ -26,7 +26,7 @@ CLASS_NAMES = ["crack", "spalling", "rust"]
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MODEL
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-MODEL_TYPE = "deeplabv3_resnet50"
+MODEL_TYPE = "deeplabv3_resnet101"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # HARDWARE – Kaggle GPU
