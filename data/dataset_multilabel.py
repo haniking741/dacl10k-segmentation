@@ -8,6 +8,10 @@ FIXES APPLIED:
              ImageNet-normalized range (~[-2.1, 2.6]), corrupting 20% of batches.
   [BUG #6] Empty fallback mask now uses actual image.size instead of
            hardcoded (512,512) → prevents shape mismatch before resize.
+  [CRACK FIX] Replaced NEAREST with BILINEAR interpolation for masks to prevent
+              thin lines from vanishing during resize/rotate.
+  [CRACK FIX] Added morphological dilation (max_pool2d) to thicken the crack mask
+              by 1 pixel before returning it to the training loop.
 """
 
 import os
@@ -16,6 +20,7 @@ import numpy as np
 from PIL import Image
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as T
 import torchvision.transforms.functional as TF
@@ -65,9 +70,6 @@ class DACL10KMultiLabelDataset(Dataset):
         """
         Load only the specified classes.
         image_size: (W, H) from image.size — used for fallback empty mask.
-
-        BUG #6 FIX: empty mask now matches actual image dimensions,
-        not a hardcoded (512, 512).
         """
         masks = []
         for class_id in self.classes_to_load:
@@ -77,7 +79,6 @@ class DACL10KMultiLabelDataset(Dataset):
             if os.path.exists(fp):
                 m = Image.open(fp).convert("L")
             else:
-                # ✅ FIX: use real image size, not hardcoded 512x512
                 m = Image.new('L', image_size, 0)
 
             masks.append(m)
@@ -102,7 +103,8 @@ class DACL10KMultiLabelDataset(Dataset):
         union_small = np.zeros((low_h, low_w), dtype=np.uint8)
 
         for m in masks:
-            ms = m.resize((low_w, low_h), resample=Image.NEAREST)
+            # ✅ CRACK FIX: Use BILINEAR so thin cracks aren't dropped in low-res search
+            ms = m.resize((low_w, low_h), resample=Image.BILINEAR)
             union_small = np.maximum(union_small, np.array(ms, dtype=np.uint8))
 
         ys, xs = np.where(union_small > 0)
@@ -152,7 +154,8 @@ class DACL10KMultiLabelDataset(Dataset):
 
         # Resize
         image = TF.resize(image, self.img_size)
-        masks = [TF.resize(m, self.img_size, interpolation=Image.NEAREST) for m in masks]
+        # ✅ CRACK FIX: Use BILINEAR to preserve thin structures during resize
+        masks = [TF.resize(m, self.img_size, interpolation=Image.BILINEAR) for m in masks]
 
         # Horizontal flip
         if random.random() > 0.5:
@@ -168,7 +171,8 @@ class DACL10KMultiLabelDataset(Dataset):
         if random.random() > 0.5:
             angle = random.uniform(-15, 15)
             image = TF.rotate(image, angle)
-            masks = [TF.rotate(m, angle, interpolation=Image.NEAREST) for m in masks]
+            # ✅ CRACK FIX: Use BILINEAR to preserve thin lines during rotation
+            masks = [TF.rotate(m, angle, interpolation=Image.BILINEAR) for m in masks]
 
         # Color Jitter (applied while still PIL Image)
         if getattr(config, 'USE_COLOR_JITTER', False):
@@ -198,41 +202,51 @@ class DACL10KMultiLabelDataset(Dataset):
 
         base = os.path.splitext(img_name)[0]
 
-        # ✅ Pass actual image.size (W,H) for correct empty mask fallback
         masks = self._load_multilabel_masks(base, image.size)
 
         if self.transform:
             image, masks = self._apply_transforms(image, masks)
         else:
             image = TF.resize(image, self.img_size)
-            masks = [TF.resize(m, self.img_size, interpolation=Image.NEAREST) for m in masks]
+            # ✅ CRACK FIX: Use BILINEAR for validation set too
+            masks = [TF.resize(m, self.img_size, interpolation=Image.BILINEAR) for m in masks]
 
-        # ─────────────────────────────────────────────────────────────────
-        # BUG #1 FIX: Apply noise BEFORE normalization, clamp to [0,1]
-        # ─────────────────────────────────────────────────────────────────
         # Convert to tensor first (values in [0.0, 1.0])
         image = TF.to_tensor(image)
 
-        # ✅ Noise added here — while values are still in [0,1]
         if self.transform and getattr(config, 'USE_RANDOM_NOISE', False):
             if random.random() < getattr(config, 'NOISE_PROB', 0.2):
                 noise = torch.randn_like(image) * getattr(config, 'NOISE_STD', 0.02)
-                image = torch.clamp(image + noise, 0.0, 1.0)  # safe clamp
+                image = torch.clamp(image + noise, 0.0, 1.0)
 
-        # ✅ Normalize AFTER noise — backbone sees correct distribution
         image = TF.normalize(
             image,
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225],
         )
-        # ─────────────────────────────────────────────────────────────────
 
         # Masks → [C, H, W] float32 binary tensor
         masks_t = []
         for m in masks:
             arr = np.array(m, dtype=np.uint8)
+            # Re-binarize here because BILINEAR introduces gray values
             masks_t.append(torch.from_numpy((arr > 0).astype(np.float32)))
         masks_t = torch.stack(masks_t, dim=0)
+
+        # ─────────────────────────────────────────────────────────────────
+        # ✅ CRACK FIX: MORPHOLOGICAL DILATION
+        # Thickens the crack mask slightly so the network can see it.
+        # Assuming crack is the 1st class in your config (index 0).
+        # ─────────────────────────────────────────────────────────────────
+        crack_idx = 0 
+        
+        # We only apply dilation during training to help the model learn,
+        # but you can remove `if self.transform:` to apply it during validation too.
+        if self.transform:
+            crack_mask = masks_t[crack_idx].unsqueeze(0).unsqueeze(0) # [1, 1, H, W]
+            thick_crack = F.max_pool2d(crack_mask, kernel_size=3, stride=1, padding=1)
+            masks_t[crack_idx] = thick_crack.squeeze()
+        # ─────────────────────────────────────────────────────────────────
 
         return image, masks_t
 
