@@ -16,7 +16,6 @@ CLASS_NAMES = [
     "exposed rebars", "bearing", "hollowareas", "joint tape",
     "restformwork", "alligator crack", "expansion joint",
 ]
-
 def load_multilabel_masks(stem: str, H: int, W: int):
     masks = np.zeros((19, H, W), dtype=np.uint8)
     active = []
@@ -42,7 +41,27 @@ def overlay_per_class(img_rgb, masks_19, alpha=0.45):
 
     # ألوان ثابتة (19 لون) من colormap
     cmap = plt.get_cmap("tab20")
-    colors = np.array([cmap(i)[:3] for i in range(19)], dtype=np.float32) * 255.0
+    colors = np.array([
+    [255, 0, 0],      # 1 graffiti - red
+    [0, 255, 0],      # 2 drainage - green
+    [0, 0, 255],      # 3 wetspot - blue
+    [255, 255, 0],    # 4 weathering - yellow
+    [255, 0, 255],    # 5 crack - magenta
+    [0, 255, 255],    # 6 rockpocket - cyan
+    [128, 0, 0],      # 7 spalling - dark red
+    [0, 128, 0],      # 8 corrosion - dark green
+    [0, 0, 128],      # 9 cavity - dark blue
+    [255, 128, 0],    # 10 efflorescence - orange
+    [128, 0, 255],    # 11 rust - purple
+    [0, 128, 255],    # 12 protective equipment
+    [128, 128, 0],    # 13 exposed rebars
+    [128, 0, 128],    # 14 bearing
+    [0, 128, 128],    # 15 hollowareas
+    [64, 0, 0],       # 16 joint tape
+    [0, 64, 0],       # 17 restformwork
+    [0, 0, 64],       # 18 alligator crack
+    [192, 192, 192],  # 19 expansion joint
+], dtype=np.float32)
 
     # خريطة من 0..19: 0 = لا شيء, k = كلاس k
     label_map = np.zeros((H, W), dtype=np.int16)
