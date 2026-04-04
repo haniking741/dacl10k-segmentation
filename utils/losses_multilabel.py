@@ -1,5 +1,9 @@
 """
 Multi-label Loss Functions with Focal Loss
+FIXES:
+  [BUG #1] Numerically stable BCE via F.binary_cross_entropy_with_logits + expand_as
+  [BUG #2] pos_weight registered as buffer (auto device movement, safe with AMP)
+  [BUG #3] Focal loss uses alpha_t: alpha for positives, (1-alpha) for negatives
 """
 
 import torch
@@ -14,56 +18,83 @@ class MultiLabelDiceLoss(nn.Module):
 
     def forward(self, logits, targets):
         probs = torch.sigmoid(logits)
-        probs = probs.contiguous().view(probs.size(0), probs.size(1), -1)
+        probs   = probs.contiguous().view(probs.size(0), probs.size(1), -1)
         targets = targets.contiguous().view(targets.size(0), targets.size(1), -1)
         intersection = (probs * targets).sum(dim=2)
         denom = probs.sum(dim=2) + targets.sum(dim=2)
-        dice = (2.0 * intersection + self.smooth) / (denom + self.smooth)
-        loss = 1.0 - dice
-        return loss.mean()
+        dice  = (2.0 * intersection + self.smooth) / (denom + self.smooth)
+        return (1.0 - dice).mean()
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2.0):
+    """
+    Sigmoid Focal Loss.
+    alpha   → weight for positive pixels  (foreground)
+    1-alpha → weight for negative pixels  (background)
+    """
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
 
     def forward(self, logits, targets):
+        # Numerically stable per-pixel BCE (no manual sigmoid)
         bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
-        p_t = torch.sigmoid(logits) * targets + (1 - torch.sigmoid(logits)) * (1 - targets)
-        focal = self.alpha * (1 - p_t) ** self.gamma * bce
+
+        probs = torch.sigmoid(logits)
+
+        # p_t: probability assigned to the TRUE class
+        p_t = probs * targets + (1.0 - probs) * (1.0 - targets)
+
+        # FIX #3: alpha_t differs for positive vs negative pixels
+        alpha_t = self.alpha * targets + (1.0 - self.alpha) * (1.0 - targets)
+
+        focal = alpha_t * (1.0 - p_t) ** self.gamma * bce
         return focal.mean()
 
 
 class CombinedLoss(nn.Module):
-    def __init__(self, pos_weight=None, smooth=1.0, w_bce=1.0, w_dice=1.0, w_focal=0.5, focal_alpha=0.25, focal_gamma=2.0):
+    def __init__(
+        self,
+        pos_weight=None,
+        smooth: float = 1.0,
+        w_bce: float = 1.0,
+        w_dice: float = 1.0,
+        w_focal: float = 0.5,
+        focal_alpha: float = 0.25,
+        focal_gamma: float = 2.0,
+    ):
         super().__init__()
-        self.w_bce = w_bce
+        self.w_bce  = w_bce
         self.w_dice = w_dice
         self.w_focal = w_focal
-        self.dice = MultiLabelDiceLoss(smooth=smooth)
+
+        self.dice  = MultiLabelDiceLoss(smooth=smooth)
         self.focal = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
 
+        # FIX #2: register_buffer → auto moves to correct device (GPU/CPU/AMP safe)
         if pos_weight is not None:
             if isinstance(pos_weight, torch.Tensor):
                 pos_weight = pos_weight.tolist()
-            self.pos_weight_values = list(pos_weight)
+            pw = torch.tensor(pos_weight, dtype=torch.float32).view(1, -1, 1, 1)
+            self.register_buffer('pos_weight', pw)
         else:
-            self.pos_weight_values = None
+            self.pos_weight = None
 
-        print(f"✅ CombinedLoss: BCE weight={w_bce}, Dice weight={w_dice}, Focal weight={w_focal}")
-        print(f"   pos_weight = {self.pos_weight_values}")
+        print(f"✅ CombinedLoss: BCE={w_bce}, Dice={w_dice}, Focal={w_focal}")
+        print(f"   pos_weight = {pos_weight}")
 
     def forward(self, logits, targets):
-        if self.pos_weight_values is not None:
-            pos_weight = torch.tensor(self.pos_weight_values, dtype=logits.dtype, device=logits.device).view(1, -1, 1, 1)
-            sigmoid = torch.sigmoid(logits)
-            bce = -(targets * pos_weight * torch.log(sigmoid + 1e-7) + (1 - targets) * torch.log(1 - sigmoid + 1e-7)).mean()
+        # FIX #1: numerically stable BCE, pos_weight broadcast over [N,C,H,W]
+        if self.pos_weight is not None:
+            pw  = self.pos_weight.expand_as(logits)          # [1,C,1,1] → [N,C,H,W]
+            bce = F.binary_cross_entropy_with_logits(
+                logits, targets, pos_weight=pw, reduction='mean'
+            )
         else:
             bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='mean')
 
         d = self.dice(logits, targets)
         f = self.focal(logits, targets)
-        total = self.w_bce * bce + self.w_dice * d + self.w_focal * f
-        return total
+
+        return self.w_bce * bce + self.w_dice * d + self.w_focal * f
