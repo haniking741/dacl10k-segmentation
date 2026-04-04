@@ -60,7 +60,7 @@ SCHEDULER_STEP_SIZE = 10
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # LOSS – class weights (sqrt‑scaled from your computed values)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-LOSS_TYPE = "bce_dice"
+LOSS_TYPE = "combined"
 BCE_POS_WEIGHT = [18.09, 6.16, 6.95]   # order: crack, spalling, rust
 DICE_SMOOTH = 1.0
 
