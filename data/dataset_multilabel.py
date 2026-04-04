@@ -1,17 +1,13 @@
 """
 Multi-label Dataset Loader for DACL10K (3 CLASSES)
-Loads only: crack (1), spalling (7), rust (11)
+Loads only: crack (5), spalling (7), rust (11)
 
 FIXES APPLIED:
-  [BUG #1] Noise is now applied BEFORE normalization, clamped to [0,1]
-           → Previously, clamp(0,1) after normalize() was destroying the
-             ImageNet-normalized range (~[-2.1, 2.6]), corrupting 20% of batches.
-  [BUG #6] Empty fallback mask now uses actual image.size instead of
-           hardcoded (512,512) → prevents shape mismatch before resize.
-  [CRACK FIX] Replaced NEAREST with BILINEAR interpolation for masks to prevent
-              thin lines from vanishing during resize/rotate.
-  [CRACK FIX] Added morphological dilation (max_pool2d) to thicken the crack mask
-              by 1 pixel before returning it to the training loop.
+  [BUG #1] Noise applied BEFORE normalization, clamped to [0,1]
+  [BUG #6] Empty fallback mask uses actual image.size
+  [CRACK FIX] Use BILINEAR interpolation for masks to preserve thin cracks
+  [CRACK FIX] Morphological dilation (max_pool) to thicken crack mask
+  [AUGMENT] Added RandAugment (rotation, flip, brightness, contrast, saturation)
 """
 
 import os
@@ -45,7 +41,7 @@ class DACL10KMultiLabelDataset(Dataset):
 
         import config
         if classes_to_load is None:
-            classes_to_load = getattr(config, 'CLASSES_TO_LOAD', [1, 7, 11])
+            classes_to_load = getattr(config, 'CLASSES_TO_LOAD', [5, 7, 11])
         self.classes_to_load = list(classes_to_load)
         self.num_labels = len(self.classes_to_load)
 
@@ -67,20 +63,14 @@ class DACL10KMultiLabelDataset(Dataset):
         return len(self.images)
 
     def _load_multilabel_masks(self, base_name, image_size):
-        """
-        Load only the specified classes.
-        image_size: (W, H) from image.size — used for fallback empty mask.
-        """
         masks = []
         for class_id in self.classes_to_load:
             fn = f"{base_name}_class{class_id:02d}.png"
             fp = os.path.join(self.mask_dir, fn)
-
             if os.path.exists(fp):
                 m = Image.open(fp).convert("L")
             else:
                 m = Image.new('L', image_size, 0)
-
             masks.append(m)
         return masks
 
@@ -103,7 +93,6 @@ class DACL10KMultiLabelDataset(Dataset):
         union_small = np.zeros((low_h, low_w), dtype=np.uint8)
 
         for m in masks:
-            # ✅ CRACK FIX: Use BILINEAR so thin cracks aren't dropped in low-res search
             ms = m.resize((low_w, low_h), resample=Image.BILINEAR)
             union_small = np.maximum(union_small, np.array(ms, dtype=np.uint8))
 
@@ -136,13 +125,38 @@ class DACL10KMultiLabelDataset(Dataset):
 
         return self._random_crop(image, masks, crop_h, crop_w)
 
+    def _randaugment(self, image, masks, n=2, m=10):
+        """RandAugment: apply n random augmentations with magnitude m (0-10)"""
+        for _ in range(n):
+            op_type = random.choice(['rot', 'hflip', 'vflip', 'bright', 'contrast', 'sat'])
+            if op_type == 'rot':
+                angle = random.uniform(-m, m)
+                image = TF.rotate(image, angle)
+                masks = [TF.rotate(m, angle, interpolation=Image.BILINEAR) for m in masks]
+            elif op_type == 'hflip':
+                image = TF.hflip(image)
+                masks = [TF.hflip(m) for m in masks]
+            elif op_type == 'vflip':
+                image = TF.vflip(image)
+                masks = [TF.vflip(m) for m in masks]
+            elif op_type == 'bright':
+                factor = 1 + random.uniform(-m/50, m/50)
+                image = TF.adjust_brightness(image, factor)
+            elif op_type == 'contrast':
+                factor = 1 + random.uniform(-m/50, m/50)
+                image = TF.adjust_contrast(image, factor)
+            elif op_type == 'sat':
+                factor = 1 + random.uniform(-m/50, m/50)
+                image = TF.adjust_saturation(image, factor)
+        return image, masks
+
     def _apply_transforms(self, image, masks):
         import config
 
         crop_h = max(64, int(self.img_size[0] * self.crop_ratio))
         crop_w = max(64, int(self.img_size[1] * self.crop_ratio))
 
-        # Crop
+        # Defect‑focused crop
         if random.random() < self.defect_crop_prob:
             image, masks = self._defect_focused_crop(
                 image, masks, crop_h, crop_w,
@@ -154,27 +168,23 @@ class DACL10KMultiLabelDataset(Dataset):
 
         # Resize
         image = TF.resize(image, self.img_size)
-        # ✅ CRACK FIX: Use BILINEAR to preserve thin structures during resize
         masks = [TF.resize(m, self.img_size, interpolation=Image.BILINEAR) for m in masks]
 
-        # Horizontal flip
+        # Random flips
         if random.random() > 0.5:
             image = TF.hflip(image)
             masks = [TF.hflip(m) for m in masks]
-
-        # Vertical flip
         if random.random() > 0.5:
             image = TF.vflip(image)
             masks = [TF.vflip(m) for m in masks]
 
-        # Rotation
+        # Rotation (larger range helps cracks)
         if random.random() > 0.5:
-            angle = random.uniform(-15, 15)
+            angle = random.uniform(-30, 30)
             image = TF.rotate(image, angle)
-            # ✅ CRACK FIX: Use BILINEAR to preserve thin lines during rotation
             masks = [TF.rotate(m, angle, interpolation=Image.BILINEAR) for m in masks]
 
-        # Color Jitter (applied while still PIL Image)
+        # Color Jitter
         if getattr(config, 'USE_COLOR_JITTER', False):
             if random.random() > 0.5:
                 image = T.ColorJitter(
@@ -184,12 +194,18 @@ class DACL10KMultiLabelDataset(Dataset):
                     hue=getattr(config, 'COLOR_JITTER_HUE', 0.1),
                 )(image)
 
-        # Gaussian Blur (still PIL)
+        # Gaussian Blur
         if getattr(config, 'USE_RANDOM_BLUR', False):
             if random.random() < getattr(config, 'BLUR_PROB', 0.3):
-                kernel_sizes = getattr(config, 'BLUR_KERNEL_SIZES', [3, 5, 7])
-                kernel_size = random.choice(kernel_sizes)
-                image = TF.gaussian_blur(image, kernel_size)
+                ks = random.choice(getattr(config, 'BLUR_KERNEL_SIZES', [3, 5, 7]))
+                image = TF.gaussian_blur(image, ks)
+
+        # RandAugment (new)
+        if self.transform and getattr(config, 'USE_RANDAUGMENT', False):
+            if random.random() < getattr(config, 'RANDAUGMENT_PROB', 0.5):
+                n = getattr(config, 'RANDAUGMENT_N', 2)
+                m = getattr(config, 'RANDAUGMENT_M', 10)
+                image, masks = self._randaugment(image, masks, n=n, m=m)
 
         return image, masks
 
@@ -201,58 +217,44 @@ class DACL10KMultiLabelDataset(Dataset):
         image = Image.open(img_path).convert("RGB")
 
         base = os.path.splitext(img_name)[0]
-
         masks = self._load_multilabel_masks(base, image.size)
 
         if self.transform:
             image, masks = self._apply_transforms(image, masks)
         else:
             image = TF.resize(image, self.img_size)
-            # ✅ CRACK FIX: Use BILINEAR for validation set too
             masks = [TF.resize(m, self.img_size, interpolation=Image.BILINEAR) for m in masks]
 
-        # Convert to tensor first (values in [0.0, 1.0])
+        # Convert to tensor
         image = TF.to_tensor(image)
 
+        # Random noise (before normalisation)
         if self.transform and getattr(config, 'USE_RANDOM_NOISE', False):
             if random.random() < getattr(config, 'NOISE_PROB', 0.2):
                 noise = torch.randn_like(image) * getattr(config, 'NOISE_STD', 0.02)
                 image = torch.clamp(image + noise, 0.0, 1.0)
 
-        image = TF.normalize(
-            image,
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
-        )
+        # Normalisation
+        image = TF.normalize(image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
-        # Masks → [C, H, W] float32 binary tensor
+        # Binary masks
         masks_t = []
         for m in masks:
             arr = np.array(m, dtype=np.uint8)
-            # Re-binarize here because BILINEAR introduces gray values
             masks_t.append(torch.from_numpy((arr > 0).astype(np.float32)))
         masks_t = torch.stack(masks_t, dim=0)
 
-        # ─────────────────────────────────────────────────────────────────
-        # ✅ CRACK FIX: MORPHOLOGICAL DILATION
-        # Thickens the crack mask slightly so the network can see it.
-        # Assuming crack is the 1st class in your config (index 0).
-        # ─────────────────────────────────────────────────────────────────
-        crack_idx = 0 
-        
-        # We only apply dilation during training to help the model learn,
-        # but you can remove `if self.transform:` to apply it during validation too.
+        # Morphological dilation for crack (class index 0)
+        crack_idx = 0
         if self.transform:
-            crack_mask = masks_t[crack_idx].unsqueeze(0).unsqueeze(0) # [1, 1, H, W]
+            crack_mask = masks_t[crack_idx].unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
             thick_crack = F.max_pool2d(crack_mask, kernel_size=3, stride=1, padding=1)
             masks_t[crack_idx] = thick_crack.squeeze()
-        # ─────────────────────────────────────────────────────────────────
 
         return image, masks_t
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-
 def get_dataloaders_multilabel(
     data_root,
     batch_size=8,
@@ -274,12 +276,12 @@ def get_dataloaders_multilabel(
         num_workers = 0
         print("🐌 CPU MODE: 256x256, batch_size=1")
 
-    train_img_dir  = os.path.join(data_root, images_subdir, "train")
-    val_img_dir    = os.path.join(data_root, images_subdir, "val")
+    train_img_dir = os.path.join(data_root, images_subdir, "train")
+    val_img_dir   = os.path.join(data_root, images_subdir, "val")
     train_mask_dir = os.path.join(data_root, masks_subdir, "train")
     val_mask_dir   = os.path.join(data_root, masks_subdir, "val")
 
-    classes_to_load = getattr(config, 'CLASSES_TO_LOAD', [1, 7, 11])
+    classes_to_load = getattr(config, 'CLASSES_TO_LOAD', [5, 7, 11])
     num_labels = len(classes_to_load)
 
     train_ds = DACL10KMultiLabelDataset(
