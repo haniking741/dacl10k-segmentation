@@ -10,7 +10,7 @@ import os
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PATHS – Kaggle dataset (read‑only) + working directories
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DATA_ROOT = "/kaggle/input/datasets/hanihafnaoui/hani-dataset/dataset2/dataset2"          # <-- ADJUST IF DIFFERENT
+DATA_ROOT = "/kaggle/input/datasets/hanihafnaoui/hani-dataset/dataset2/dataset2"   # <-- VERIFY THIS PATH
 MASKS_SUBDIR = "masks_multilabel"
 IMAGES_SUBDIR = "images"
 SAVE_DIR = "/kaggle/working/checkpoints2"
@@ -40,7 +40,7 @@ GPU_ID = 0
 IMG_SIZE = (512, 512)
 BATCH_SIZE = 8
 NUM_WORKERS = 4
-NUM_EPOCHS = 50                     # You can increase to 100 if you have time
+NUM_EPOCHS = 60                      # Increased from 50 to 60
 EARLY_STOPPING_PATIENCE = 12
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -58,19 +58,26 @@ SCHEDULER_PATIENCE = 5
 SCHEDULER_STEP_SIZE = 10
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# LOSS – class weights (sqrt‑scaled from your computed values)
+# LOSS – Combined Loss (BCE + Dice + Focal) with class weights
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-LOSS_TYPE = "combined"
-BCE_POS_WEIGHT = [18.09, 6.16, 6.95]   # order: crack, spalling, rust
+LOSS_TYPE = "combined"                # "combined" uses BCE + Dice + Focal
+W_BCE = 1.0
+W_DICE = 1.0
+W_FOCAL = 0.5                         # Focal loss weight (can be increased to 1.0)
+FOCAL_ALPHA = 0.25
+FOCAL_GAMMA = 2.0
+
+# Class weights – crack weight increased from 18.09 to 30.0
+BCE_POS_WEIGHT = [30.0, 6.16, 6.95]   # order: crack, spalling, rust
 DICE_SMOOTH = 1.0
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# AUGMENTATION (keep as before)
+# AUGMENTATION (enhanced for cracks)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DEFECT_CROP_PROB = 0.7
 CROP_RATIO = 0.60
-CROP_TRIES = 10
-MIN_DEFECT_RATIO = 0.01
+CROP_TRIES = 15                       # Increased from 10 to 15
+MIN_DEFECT_RATIO = 0.005              # Lowered from 0.01 to 0.005 (to catch more cracks)
 
 USE_COLOR_JITTER = True
 COLOR_JITTER_BRIGHTNESS = 0.3
@@ -85,6 +92,12 @@ BLUR_KERNEL_SIZES = [3, 5, 7]
 USE_RANDOM_NOISE = True
 NOISE_PROB = 0.2
 NOISE_STD = 0.02
+
+# RandAugment (new)
+USE_RANDAUGMENT = True
+RANDAUGMENT_PROB = 0.5
+RANDAUGMENT_N = 2
+RANDAUGMENT_M = 10
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MIXED PRECISION (AMP) – supported on Kaggle GPUs
