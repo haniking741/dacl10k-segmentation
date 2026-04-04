@@ -1,12 +1,8 @@
 """
 Training Script (MULTI-LABEL) for DACL10K - 3 Classes
-Optimized for RTX 4070 with AMP
+Optimized for RTX 4070 / Kaggle T4 with AMP
 
-FIXES APPLIED:
-  [BUG #2] train_epoch() now handles the (main_logits, aux_logits) tuple
-           returned by DeepLabV3Plus.forward() during training.
-           Auxiliary loss is added with weight 0.4 (standard DeepLab practice).
-           validate() uses model.eval() so forward() returns only main_logits.
+Uses CombinedLoss = BCE + Dice + Focal
 """
 
 import os
@@ -26,12 +22,10 @@ except ImportError:
 import config
 from models.deeplabv3 import get_model
 from data.dataset_multilabel import get_dataloaders_multilabel
-from utils.losses_multilabel import CombinedBCEDice
+from utils.losses_multilabel import CombinedLoss   # <-- UPDATED
 from utils.metrics_multilabel import MultiLabelSegmentationMetrics
 
-# Weight applied to the auxiliary head loss (standard DeepLab value)
 AUX_LOSS_WEIGHT = 0.4
-
 
 class Trainer:
     def __init__(self):
@@ -39,9 +33,7 @@ class Trainer:
         np.random.seed(config.RANDOM_SEED)
 
         self.device, self.device_type = self._get_device()
-
         self.use_amp = bool(getattr(config, "USE_AMP", False)) and (self.device_type == "cuda")
-
         if self.use_amp:
             self.scaler = GradScaler('cuda') if USE_NEW_AMP_API else GradScaler()
         else:
@@ -77,13 +69,12 @@ class Trainer:
         self.metrics = MultiLabelSegmentationMetrics(
             num_classes=self.num_labels,
             class_names=getattr(config, "CLASS_NAMES", None),
-            threshold=getattr(config, "THRESHOLD", 0.25),
+            threshold=getattr(config, "THRESHOLD", 0.5),
             ignore_empty=True,
         )
 
         self.best_miou = 0.0
         self.start_epoch = 0
-
         checkpoint_path = os.path.join(config.SAVE_DIR, "checkpoint_best_multilabel.pth")
         self.start_epoch = self.load_checkpoint(checkpoint_path)
 
@@ -92,9 +83,6 @@ class Trainer:
         print(f"⚡ AMP {amp_label}")
         print(f"🔀 Auxiliary loss weight: {AUX_LOSS_WEIGHT}")
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Checkpoint
-    # ─────────────────────────────────────────────────────────────────────
     def load_checkpoint(self, path):
         if os.path.exists(path):
             print(f"🔄 Loading checkpoint: {path}")
@@ -110,9 +98,6 @@ class Trainer:
         print("🆕 No checkpoint found — training from scratch.")
         return 0
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Device
-    # ─────────────────────────────────────────────────────────────────────
     def _get_device(self):
         if getattr(config, "CPU_MODE", False):
             print("🐌 CPU MODE forced")
@@ -122,9 +107,6 @@ class Trainer:
             return torch.device("cuda"), "cuda"
         return torch.device("cpu"), "cpu"
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Config summary
-    # ─────────────────────────────────────────────────────────────────────
     def _print_config_summary(self):
         print("\n" + "=" * 70)
         print("TRAINING CONFIGURATION (MULTI-LABEL — 3 CLASSES)")
@@ -138,7 +120,7 @@ class Trainer:
             ("Epochs",       config.NUM_EPOCHS),
             ("LR",           config.LEARNING_RATE),
             ("Optimizer",    config.OPTIMIZER),
-            ("Loss",         config.LOSS_TYPE),
+            ("Loss",         "Combined (BCE + Dice + Focal)"),
             ("AMP",          self.use_amp),
             ("Class Weights",config.BCE_POS_WEIGHT),
             ("Workers",      config.NUM_WORKERS),
@@ -146,22 +128,22 @@ class Trainer:
             print(f"  {k:<14}: {v}")
         print("=" * 70)
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Loss / Optimizer / Scheduler
-    # ─────────────────────────────────────────────────────────────────────
     def _get_criterion(self):
-        print("📊 Loss: BCE + Dice with class weights")
-        return CombinedBCEDice(
+        print("📊 Loss: Combined (BCE + Dice + Focal)")
+        return CombinedLoss(
             pos_weight=config.BCE_POS_WEIGHT,
             smooth=config.DICE_SMOOTH,
-            w_bce=1.0,
-            w_dice=1.0,
+            w_bce=getattr(config, 'W_BCE', 1.0),
+            w_dice=getattr(config, 'W_DICE', 1.0),
+            w_focal=getattr(config, 'W_FOCAL', 0.5),
+            focal_alpha=getattr(config, 'FOCAL_ALPHA', 0.25),
+            focal_gamma=getattr(config, 'FOCAL_GAMMA', 2.0),
         )
 
     def _get_optimizer(self):
         name = config.OPTIMIZER.lower()
-        lr   = config.LEARNING_RATE
-        wd   = config.WEIGHT_DECAY
+        lr = config.LEARNING_RATE
+        wd = config.WEIGHT_DECAY
         if name == "adam":
             opt = optim.Adam(self.model.parameters(), lr=lr, weight_decay=wd)
         elif name == "adamw":
@@ -190,26 +172,15 @@ class Trainer:
                 factor=config.SCHEDULER_FACTOR, patience=config.SCHEDULER_PATIENCE)
         raise ValueError(f"Unknown scheduler: {config.SCHEDULER_TYPE}")
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Training epoch
-    # ─────────────────────────────────────────────────────────────────────
     def _forward_and_loss(self, imgs, masks):
-        """
-        Run forward pass and compute loss.
-        ✅ FIX #2: model.train() → returns (main, aux) tuple.
-        We compute loss on both and combine with AUX_LOSS_WEIGHT.
-        """
         out = self.model(imgs)
-
         if isinstance(out, tuple):
-            # Training mode: (main_logits, aux_logits)
-            main_logits, aux_logits = out
-            main_loss = self.criterion(main_logits, masks)
-            aux_loss  = self.criterion(aux_logits,  masks)
-            loss      = main_loss + AUX_LOSS_WEIGHT * aux_loss
-            return main_logits, loss
+            main, aux = out
+            main_loss = self.criterion(main, masks)
+            aux_loss = self.criterion(aux, masks)
+            loss = main_loss + AUX_LOSS_WEIGHT * aux_loss
+            return main, loss
         else:
-            # Eval mode or aux disabled: just a tensor
             loss = self.criterion(out, masks)
             return out, loss
 
@@ -217,12 +188,10 @@ class Trainer:
         self.model.train()
         total_loss = 0.0
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{config.NUM_EPOCHS} [TRAIN]")
-
         for imgs, masks in pbar:
-            imgs  = imgs.to(self.device)
+            imgs = imgs.to(self.device)
             masks = masks.to(self.device)
             self.optimizer.zero_grad(set_to_none=True)
-
             if self.use_amp:
                 ctx = autocast('cuda') if USE_NEW_AMP_API else autocast()
                 with ctx:
@@ -234,89 +203,71 @@ class Trainer:
                 _, loss = self._forward_and_loss(imgs, masks)
                 loss.backward()
                 self.optimizer.step()
-
-            total_loss += float(loss.item())
+            total_loss += loss.item()
             pbar.set_postfix(loss=f"{loss.item():.4f}")
-
         return total_loss / max(1, len(self.train_loader))
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Validation epoch
-    # ─────────────────────────────────────────────────────────────────────
     @torch.no_grad()
     def validate(self, epoch):
-        self.model.eval()   # ✅ eval() → forward() returns plain tensor (no aux)
+        self.model.eval()
         self.metrics.reset()
         total_loss = 0.0
         pbar = tqdm(self.val_loader, desc=f"Epoch {epoch}/{config.NUM_EPOCHS} [VAL]")
-
         for imgs, masks in pbar:
-            imgs  = imgs.to(self.device)
+            imgs = imgs.to(self.device)
             masks = masks.to(self.device)
-            logits = self.model(imgs)          # plain tensor in eval mode
-            loss   = self.criterion(logits, masks)
-            total_loss += float(loss.item())
+            logits = self.model(imgs)
+            loss = self.criterion(logits, masks)
+            total_loss += loss.item()
             self.metrics.update(logits, masks)
             pbar.set_postfix(loss=f"{loss.item():.4f}")
-
         metrics = self.metrics.get_metrics()
         return total_loss / max(1, len(self.val_loader)), metrics
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Checkpoint save
-    # ─────────────────────────────────────────────────────────────────────
     def save_best(self, epoch, miou):
         path = os.path.join(config.SAVE_DIR, "checkpoint_best_multilabel.pth")
         torch.save({
-            "epoch":              epoch,
-            "model_state_dict":   self.model.state_dict(),
+            "epoch": epoch,
+            "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
-            "best_miou":          float(miou),
-            "num_labels":         self.num_labels,
+            "best_miou": float(miou),
+            "num_labels": self.num_labels,
         }, path)
         print(f"💾 Saved BEST checkpoint (mIoU={miou:.4f}) → {path}")
 
-    # ─────────────────────────────────────────────────────────────────────
-    # Main training loop
-    # ─────────────────────────────────────────────────────────────────────
     def train(self):
         print("\n" + "=" * 70)
         print(f"🚀 START TRAINING FROM EPOCH {self.start_epoch}")
         print("=" * 70)
-
         no_improve = 0
-
         for epoch in range(self.start_epoch, config.NUM_EPOCHS):
             t0 = time.time()
-            tr_loss            = self.train_epoch(epoch)
-            val_loss, metrics  = self.validate(epoch)
-            miou               = metrics.get("mean_IoU", 0.0)
-
+            tr_loss = self.train_epoch(epoch)
+            val_loss, metrics = self.validate(epoch)
+            miou = metrics.get("mean_IoU", 0.0)
+            mf1 = metrics.get("mean_F1", 0.0)
             print(f"\n📊 Epoch {epoch} Summary:")
-            print(f"   Train Loss : {tr_loss:.4f}  |  Val Loss : {val_loss:.4f}  |  mIoU : {miou:.4f}")
+            print(f"   Train Loss : {tr_loss:.4f}  |  Val Loss : {val_loss:.4f}")
+            print(f"   mIoU       : {miou:.4f}  |  mF1 : {mf1:.4f}")
             print(f"   LR         : {self.optimizer.param_groups[0]['lr']:.6f}  |  Time : {time.time()-t0:.1f}s")
-            print("   Per-class IoU:")
+            print("   Per-class IoU & F1:")
             for cls in metrics['per_class']:
                 if cls['valid']:
-                    print(f"     {cls['name']:12s}: {cls['IoU']:.4f}")
-
+                    print(f"     {cls['name']:12s}: IoU={cls['IoU']:.4f}  F1={cls['F1']:.4f}")
             if miou > self.best_miou:
                 self.best_miou = miou
                 no_improve = 0
                 self.save_best(epoch, miou)
             else:
                 no_improve += 1
-
             if self.scheduler is not None:
                 if config.SCHEDULER_TYPE.lower() == "plateau":
                     self.scheduler.step(miou)
                 else:
                     self.scheduler.step()
-
             if no_improve >= config.EARLY_STOPPING_PATIENCE:
                 print(f"\n⚠️  Early stopping — no improvement for {no_improve} epochs.")
                 break
-
         print(f"\n✅ Training complete.  Best mIoU: {self.best_miou:.4f}")
 
 if __name__ == "__main__":
